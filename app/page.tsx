@@ -22,9 +22,15 @@ interface Branch {
   비고: string;
 }
 
+interface CustomImportant {
+  제목: string;
+  내용: string;
+}
+
 interface ParsedData {
   modules: Module[];
   branches: Branch[];
+  customImportant: CustomImportant[]; // "중요발화" 시트에서 읽어온 직접 작성 발화
 }
 
 interface SavedScript {
@@ -133,7 +139,18 @@ function parseExcel(file: File): Promise<ParsedData> {
             비고: r["비고"] || "",
           }));
 
-        resolve({ modules, branches });
+        // ── "중요발화" 시트: 직접 작성한 중요 발화 (없으면 빈 배열)
+        const customSheet = wb.Sheets["중요발화"];
+        const customImportant: CustomImportant[] = customSheet
+          ? XLSX.utils.sheet_to_json<Record<string, string>>(customSheet, { defval: "" })
+              .filter((r) => r["내용"]?.toString().trim())
+              .map((r) => ({
+                제목: r["제목"]?.toString().trim() || "",
+                내용: r["내용"]?.toString().trim(),
+              }))
+          : [];
+
+        resolve({ modules, branches, customImportant });
       } catch {
         reject(new Error("파일을 읽는 중 오류가 발생했습니다."));
       }
@@ -559,6 +576,29 @@ export default function Home() {
                             </div>
                           </div>
                         ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* 중요발화 시트 섹션 */}
+                {parsedData && parsedData.customImportant.length > 0 && (
+                  <div className="bg-white rounded-2xl border border-blue-200 p-6">
+                    <div className="flex items-center gap-2 mb-4">
+                      <span className="text-blue-400 text-sm">📋</span>
+                      <h2 className="text-sm font-semibold text-black">직접 작성한 중요 발화</h2>
+                      <span className="ml-auto text-xs text-gray-400">엑셀 &quot;중요발화&quot; 시트</span>
+                    </div>
+                    <div className="space-y-3">
+                      {parsedData.customImportant.map((item, i) => (
+                        <div key={i} className="rounded-xl border border-blue-100 bg-blue-50 p-4">
+                          {item.제목 && (
+                            <p className="text-xs font-semibold text-blue-700 mb-2">{item.제목}</p>
+                          )}
+                          <p className="text-sm text-black leading-relaxed whitespace-pre-wrap bg-white rounded-lg p-3 border border-blue-100">
+                            {applyReplacements(item.내용, info)}
+                          </p>
+                        </div>
+                      ))}
                     </div>
                   </div>
                 )}
