@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import * as XLSX from "xlsx";
 
 // ─── 타입 ────────────────────────────────────────────────────────────────────
@@ -26,6 +26,15 @@ interface ParsedData {
   branches: Branch[];
 }
 
+interface SavedScript {
+  id: string;
+  모듈명: string;
+  모듈코드: string;
+  cf: string;
+  발화: string;
+  savedAt: string;
+}
+
 interface CustomerInfo {
   customerName: string;
   gender: string;
@@ -49,6 +58,8 @@ const CF_LABELS: Record<string, string> = {
 
 const INPUT_CLS =
   "w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-black focus:outline-none focus:ring-2 focus:ring-blue-400 bg-white";
+
+const STORAGE_KEY = "savedScripts_v1";
 
 // ─── 이름 치환 ────────────────────────────────────────────────────────────────
 
@@ -121,10 +132,38 @@ function parseExcel(file: File): Promise<ParsedData> {
   });
 }
 
+// ─── 모듈 필터링 (선택 안한 항목 관련 모듈 제외) ────────────────────────────────
+
+const FIELD_MODULE_PATTERNS: { field: keyof CustomerInfo; patterns: string[] }[] = [
+  { field: "renewalType",    patterns: ["갱신형"] },
+  { field: "coverageRange",  patterns: ["보장범위"] },
+  { field: "coverageAmount", patterns: ["보장금액"] },
+  { field: "coveragePeriod", patterns: ["보장기간", "납입기간"] },
+];
+
+function shouldShowModule(module: Module, info: CustomerInfo): boolean {
+  for (const { field, patterns } of FIELD_MODULE_PATTERNS) {
+    const isRelated = patterns.some((p) => module.모듈명.includes(p));
+    if (isRelated && !info[field]) return false;
+  }
+  return true;
+}
+
+function findNextVisible(
+  fromModule: Module,
+  modules: Module[],
+  info: CustomerInfo
+): Module | undefined {
+  const idx = modules.findIndex((m) => m.모듈명 === fromModule.모듈명);
+  for (let i = idx + 1; i < modules.length; i++) {
+    if (shouldShowModule(modules[i], info)) return modules[i];
+  }
+  return undefined;
+}
+
 // ─── 모듈 검색 (유사 이름 매칭) ──────────────────────────────────────────────
 
 function findModule(targetName: string, modules: Module[]): Module | undefined {
-  // "이탈 방어 → 니즈 선택" 형태면 → 이후 부분을 실제 목적지로 사용
   const name = targetName.includes("→")
     ? targetName.split("→").pop()!.trim()
     : targetName.trim();
@@ -146,17 +185,22 @@ function pickScript(module: Module, info: CustomerInfo): string {
   return applyReplacements(line, info);
 }
 
+// ─── 날짜 포맷 ────────────────────────────────────────────────────────────────
+
+function formatDate(iso: string): string {
+  const d = new Date(iso);
+  return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
 // ─── 컴포넌트 ─────────────────────────────────────────────────────────────────
 
 export default function Home() {
-  // 파일 & 파싱
   const [parsedData, setParsedData] = useState<ParsedData | null>(null);
   const [fileName, setFileName] = useState("");
   const [fileError, setFileError] = useState("");
   const [dragging, setDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // 고객 정보
   const [customerName, setCustomerName] = useState("");
   const [gender, setGender] = useState("");
   const [age, setAge] = useState("");
@@ -171,14 +215,65 @@ export default function Home() {
     renewalType, coverageRange, coverageAmount, coveragePeriod,
   };
 
-  // 상담 진행 상태
   const [started, setStarted] = useState(false);
   const [currentModule, setCurrentModule] = useState<Module | null>(null);
   const [currentScript, setCurrentScript] = useState("");
   const [history, setHistory] = useState<{ module: Module; script: string }[]>([]);
   const [done, setDone] = useState(false);
 
-  // ── 파일 업로드 ──
+  // ── 홈 탭 (상담 | 저장된 발화) ──
+  const [homeTab, setHomeTab] = useState<"상담" | "저장">("상담");
+
+  // ── 저장된 발화 (localStorage 동기화) ──
+  const [savedScripts, setSavedScripts] = useState<SavedScript[]>([]);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) setSavedScripts(JSON.parse(raw));
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  function persistSaved(next: SavedScript[]) {
+    setSavedScripts(next);
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    } catch {
+      // ignore
+    }
+  }
+
+  function handleSave() {
+    if (!currentModule || !currentScript) return;
+    // 동일 발화 중복 저장 방지
+    if (savedScripts.some((s) => s.발화 === currentScript && s.모듈명 === currentModule.모듈명)) return;
+    const newItem: SavedScript = {
+      id: Date.now().toString(),
+      모듈명: currentModule.모듈명,
+      모듈코드: currentModule.모듈코드,
+      cf: currentModule.cf,
+      발화: currentScript,
+      savedAt: new Date().toISOString(),
+    };
+    persistSaved([newItem, ...savedScripts]);
+  }
+
+  function handleDeleteSaved(id: string) {
+    persistSaved(savedScripts.filter((s) => s.id !== id));
+  }
+
+  function handleClearAll() {
+    if (confirm("저장된 발화를 모두 삭제할까요?")) persistSaved([]);
+  }
+
+  // 현재 스크립트가 이미 저장됐는지
+  const isAlreadySaved =
+    !!currentModule &&
+    savedScripts.some((s) => s.발화 === currentScript && s.모듈명 === currentModule.모듈명);
+
+  // ── 파일 ──
   const handleFile = useCallback(async (file: File) => {
     if (!file.name.match(/\.(xlsx|xls)$/i)) {
       setFileError("엑셀 파일(.xlsx, .xls)만 업로드 가능합니다.");
@@ -205,10 +300,9 @@ export default function Home() {
     [handleFile]
   );
 
-  // ── 상담 시작 ──
   function handleStart() {
     if (!parsedData) return;
-    const first = parsedData.modules[0];
+    const first = parsedData.modules.find((m) => shouldShowModule(m, info));
     if (!first) return;
     setCurrentModule(first);
     setCurrentScript(pickScript(first, info));
@@ -217,16 +311,11 @@ export default function Home() {
     setStarted(true);
   }
 
-  // ── 고객 응답 선택 → 다음 모듈로 ──
   function handleResponse(branch: Branch) {
     if (!parsedData || !currentModule) return;
-
-    // 현재 모듈을 히스토리에 저장
     setHistory((h) => [...h, { module: currentModule, script: currentScript }]);
 
     const nextName = branch.다음모듈;
-
-    // "상담 종료" 계열 키워드면 완료 처리
     if (
       nextName.includes("종료") ||
       nextName.includes("CF1부터") ||
@@ -237,29 +326,24 @@ export default function Home() {
     }
 
     const next = findModule(nextName, parsedData.modules);
-    if (!next) {
-      // 매칭되는 모듈이 없으면 순서상 다음 모듈로
-      const idx = parsedData.modules.findIndex((m) => m.모듈명 === currentModule.모듈명);
-      const fallback = parsedData.modules[idx + 1];
-      if (fallback) {
-        setCurrentModule(fallback);
-        setCurrentScript(pickScript(fallback, info));
-      } else {
-        setDone(true);
-      }
-      return;
-    }
+    const target = next && shouldShowModule(next, info)
+      ? next
+      : next
+        ? findNextVisible(next, parsedData.modules, info)
+        : findNextVisible(currentModule, parsedData.modules, info);
 
-    setCurrentModule(next);
-    setCurrentScript(pickScript(next, info));
+    if (target) {
+      setCurrentModule(target);
+      setCurrentScript(pickScript(target, info));
+    } else {
+      setDone(true);
+    }
   }
 
-  // ── 분기 없을 때 다음 모듈 순서 진행 ──
   function handleNext() {
     if (!parsedData || !currentModule) return;
     setHistory((h) => [...h, { module: currentModule, script: currentScript }]);
-    const idx = parsedData.modules.findIndex((m) => m.모듈명 === currentModule.모듈명);
-    const next = parsedData.modules[idx + 1];
+    const next = findNextVisible(currentModule, parsedData.modules, info);
     if (next) {
       setCurrentModule(next);
       setCurrentScript(pickScript(next, info));
@@ -268,7 +352,6 @@ export default function Home() {
     }
   }
 
-  // ── 뒤로 가기 ──
   function handleBack() {
     if (history.length === 0) return;
     const prev = history[history.length - 1];
@@ -278,24 +361,19 @@ export default function Home() {
     setDone(false);
   }
 
-  // ── 발화 다시 뽑기 ──
   function handleReroll() {
     if (!currentModule) return;
     setCurrentScript(pickScript(currentModule, info));
   }
 
-  // ── 현재 모듈의 분기 목록 ──
   const currentBranches = parsedData && currentModule
     ? getBranches(currentModule.모듈명, parsedData.branches)
     : [];
-
-  // ─── 렌더 ───────────────────────────────────────────────────────────────────
 
   return (
     <main className="min-h-screen py-10 px-4">
       <div className="max-w-2xl mx-auto">
 
-        {/* ── 헤더 ── */}
         <div className="mb-8 text-center">
           <h1 className="text-2xl font-bold text-black mb-1">보험 상담 스크립트</h1>
           <p className="text-sm text-black">고객 반응에 따라 다음 발화를 안내해드립니다.</p>
@@ -304,145 +382,222 @@ export default function Home() {
         {/* ── 준비 화면 ── */}
         {!started && (
           <>
-            {/* 고객 & 설계사 정보 */}
-            <div className="bg-white rounded-2xl border border-gray-300 p-6 mb-4">
-              <h2 className="text-sm font-semibold text-black uppercase tracking-wide mb-4">상담 정보 입력</h2>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-black mb-1">고객 이름</label>
-                  <input type="text" placeholder="홍길동" value={customerName}
-                    onChange={(e) => setCustomerName(e.target.value)} className={INPUT_CLS} />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-black mb-1">설계사 이름</label>
-                  <input type="text" placeholder="내 이름" value={consultantName}
-                    onChange={(e) => setConsultantName(e.target.value)} className={INPUT_CLS} />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-black mb-1">성별</label>
-                  <select value={gender} onChange={(e) => setGender(e.target.value)} className={INPUT_CLS}>
-                    <option value="">선택 안함</option>
-                    <option value="남성">남성</option>
-                    <option value="여성">여성</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-black mb-1">나이</label>
-                  <input type="text" placeholder="예: 35세" value={age}
-                    onChange={(e) => setAge(e.target.value)} className={INPUT_CLS} />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-black mb-1">갱신형</label>
-                  <select value={renewalType} onChange={(e) => setRenewalType(e.target.value)} className={INPUT_CLS}>
-                    <option value="">선택 안함</option>
-                    <option value="갱신형">갱신형</option>
-                    <option value="비갱신형">비갱신형</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-black mb-1">보장범위</label>
-                  <select value={coverageRange} onChange={(e) => setCoverageRange(e.target.value)} className={INPUT_CLS}>
-                    <option value="">선택 안함</option>
-                    <option value="기본형">기본형</option>
-                    <option value="표준형">표준형</option>
-                    <option value="광범위형">광범위형</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-black mb-1">보장금액</label>
-                  <select value={coverageAmount} onChange={(e) => setCoverageAmount(e.target.value)} className={INPUT_CLS}>
-                    <option value="">선택 안함</option>
-                    <option value="소액">소액</option>
-                    <option value="중액">중액</option>
-                    <option value="고액">고액</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-black mb-1">보장기간</label>
-                  <select value={coveragePeriod} onChange={(e) => setCoveragePeriod(e.target.value)} className={INPUT_CLS}>
-                    <option value="">선택 안함</option>
-                    <option value="10년">10년</option>
-                    <option value="20년">20년</option>
-                    <option value="30년">30년</option>
-                    <option value="80세 만기">80세 만기</option>
-                    <option value="90세 만기">90세 만기</option>
-                    <option value="100세 만기">100세 만기</option>
-                  </select>
-                </div>
-              </div>
-            </div>
-
-            {/* 파일 업로드 */}
-            <div className="bg-white rounded-2xl border border-gray-300 p-6 mb-6">
-              <h2 className="text-sm font-semibold text-black uppercase tracking-wide mb-4">엑셀 파일 업로드</h2>
-              <div
-                onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
-                onDragLeave={() => setDragging(false)}
-                onDrop={handleDrop}
-                onClick={() => fileInputRef.current?.click()}
-                className={`border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-colors
-                  ${dragging ? "border-blue-400 bg-blue-50" : "border-gray-300 hover:border-gray-400 hover:bg-gray-50"}`}
-              >
-                <input ref={fileInputRef} type="file" accept=".xlsx,.xls" className="hidden"
-                  onChange={(e) => { if (e.target.files?.[0]) handleFile(e.target.files[0]); }} />
-                {fileName ? (
-                  <>
-                    <p className="text-sm font-semibold text-black mb-1">{fileName}</p>
-                    <p className="text-xs text-black">
-                      발화 {parsedData?.modules.length}개 · 분기 {parsedData?.branches.length}개 로드됨 — 클릭하면 다시 업로드
-                    </p>
-                  </>
-                ) : (
-                  <>
-                    <p className="text-sm text-black mb-1">엑셀 파일을 드래그하거나 클릭해서 업로드</p>
-                    <p className="text-xs text-black">.xlsx, .xls 지원 (시트1: 분기, 시트3: 발화)</p>
-                  </>
-                )}
-              </div>
-              {fileError && <p className="mt-3 text-sm text-red-500">{fileError}</p>}
-
+            {/* 탭 */}
+            <div className="flex gap-1 mb-4 bg-gray-200 rounded-xl p-1">
               <button
-                onClick={handleStart}
-                disabled={!parsedData}
-                className="mt-5 w-full py-3 rounded-lg text-sm font-semibold transition-colors
-                  bg-blue-600 text-white hover:bg-blue-700 disabled:bg-gray-200 disabled:text-black disabled:cursor-not-allowed"
+                onClick={() => setHomeTab("상담")}
+                className={`flex-1 py-2 rounded-lg text-sm font-semibold transition-colors ${
+                  homeTab === "상담"
+                    ? "bg-white text-black shadow-sm"
+                    : "text-gray-500 hover:text-black"
+                }`}
               >
-                {parsedData ? "상담 시작" : "파일을 먼저 업로드해주세요"}
+                상담 시작
+              </button>
+              <button
+                onClick={() => setHomeTab("저장")}
+                className={`flex-1 py-2 rounded-lg text-sm font-semibold transition-colors relative ${
+                  homeTab === "저장"
+                    ? "bg-white text-black shadow-sm"
+                    : "text-gray-500 hover:text-black"
+                }`}
+              >
+                저장된 발화
+                {savedScripts.length > 0 && (
+                  <span className="ml-1.5 inline-flex items-center justify-center w-5 h-5 rounded-full bg-blue-500 text-white text-xs font-bold">
+                    {savedScripts.length}
+                  </span>
+                )}
               </button>
             </div>
+
+            {/* ── 상담 탭 ── */}
+            {homeTab === "상담" && (
+              <>
+                <div className="bg-white rounded-2xl border border-gray-300 p-6 mb-4">
+                  <h2 className="text-sm font-semibold text-black uppercase tracking-wide mb-4">상담 정보 입력</h2>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-medium text-black mb-1">고객 이름</label>
+                      <input type="text" placeholder="홍길동" value={customerName}
+                        onChange={(e) => setCustomerName(e.target.value)} className={INPUT_CLS} />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-black mb-1">설계사 이름</label>
+                      <input type="text" placeholder="내 이름" value={consultantName}
+                        onChange={(e) => setConsultantName(e.target.value)} className={INPUT_CLS} />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-black mb-1">성별</label>
+                      <select value={gender} onChange={(e) => setGender(e.target.value)} className={INPUT_CLS}>
+                        <option value="">선택 안함</option>
+                        <option value="남성">남성</option>
+                        <option value="여성">여성</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-black mb-1">나이</label>
+                      <input type="text" placeholder="예: 35세" value={age}
+                        onChange={(e) => setAge(e.target.value)} className={INPUT_CLS} />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-black mb-1">갱신형</label>
+                      <select value={renewalType} onChange={(e) => setRenewalType(e.target.value)} className={INPUT_CLS}>
+                        <option value="">선택 안함</option>
+                        <option value="갱신형">갱신형</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-black mb-1">보장범위</label>
+                      <select value={coverageRange} onChange={(e) => setCoverageRange(e.target.value)} className={INPUT_CLS}>
+                        <option value="">선택 안함</option>
+                        <option value="좁음">좁음</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-black mb-1">보장금액</label>
+                      <select value={coverageAmount} onChange={(e) => setCoverageAmount(e.target.value)} className={INPUT_CLS}>
+                        <option value="">선택 안함</option>
+                        <option value="부족">부족</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-black mb-1">보장기간</label>
+                      <select value={coveragePeriod} onChange={(e) => setCoveragePeriod(e.target.value)} className={INPUT_CLS}>
+                        <option value="">선택 안함</option>
+                        <option value="짧음">짧음</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-2xl border border-gray-300 p-6 mb-6">
+                  <h2 className="text-sm font-semibold text-black uppercase tracking-wide mb-4">엑셀 파일 업로드</h2>
+                  <div
+                    onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+                    onDragLeave={() => setDragging(false)}
+                    onDrop={handleDrop}
+                    onClick={() => fileInputRef.current?.click()}
+                    className={`border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-colors
+                      ${dragging ? "border-blue-400 bg-blue-50" : "border-gray-300 hover:border-gray-400 hover:bg-gray-50"}`}
+                  >
+                    <input ref={fileInputRef} type="file" accept=".xlsx,.xls" className="hidden"
+                      onChange={(e) => { if (e.target.files?.[0]) handleFile(e.target.files[0]); }} />
+                    {fileName ? (
+                      <>
+                        <p className="text-sm font-semibold text-black mb-1">{fileName}</p>
+                        <p className="text-xs text-black">
+                          발화 {parsedData?.modules.length}개 · 분기 {parsedData?.branches.length}개 로드됨 — 클릭하면 다시 업로드
+                        </p>
+                      </>
+                    ) : (
+                      <>
+                        <p className="text-sm text-black mb-1">엑셀 파일을 드래그하거나 클릭해서 업로드</p>
+                        <p className="text-xs text-black">.xlsx, .xls 지원 (시트1: 분기, 시트3: 발화)</p>
+                      </>
+                    )}
+                  </div>
+                  {fileError && <p className="mt-3 text-sm text-red-500">{fileError}</p>}
+
+                  <button
+                    onClick={handleStart}
+                    disabled={!parsedData}
+                    className="mt-5 w-full py-3 rounded-lg text-sm font-semibold transition-colors
+                      bg-blue-600 text-white hover:bg-blue-700 disabled:bg-gray-200 disabled:text-black disabled:cursor-not-allowed"
+                  >
+                    {parsedData ? "상담 시작" : "파일을 먼저 업로드해주세요"}
+                  </button>
+                </div>
+              </>
+            )}
+
+            {/* ── 저장된 발화 탭 ── */}
+            {homeTab === "저장" && (
+              <div className="bg-white rounded-2xl border border-gray-300 p-6 mb-6">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-sm font-semibold text-black uppercase tracking-wide">저장된 발화</h2>
+                  {savedScripts.length > 0 && (
+                    <button
+                      onClick={handleClearAll}
+                      className="text-xs text-red-400 hover:text-red-600 transition-colors"
+                    >
+                      전체 삭제
+                    </button>
+                  )}
+                </div>
+
+                {savedScripts.length === 0 ? (
+                  <div className="py-12 text-center">
+                    <p className="text-3xl mb-3">★</p>
+                    <p className="text-sm text-gray-400">아직 저장된 발화가 없습니다.</p>
+                    <p className="text-xs text-gray-400 mt-1">상담 중 ★ 버튼을 눌러 발화를 저장하세요.</p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {savedScripts.map((s) => (
+                      <div key={s.id} className="rounded-xl border border-gray-200 p-4 relative group">
+                        <div className="flex items-start justify-between gap-2 mb-2">
+                          <div>
+                            <span className="text-xs font-semibold text-blue-600">{s.모듈명}</span>
+                            {s.모듈코드 && (
+                              <span className="ml-2 text-xs text-gray-400">{s.모듈코드}</span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2 flex-shrink-0">
+                            <span className="text-xs text-gray-400">{formatDate(s.savedAt)}</span>
+                            <button
+                              onClick={() => handleDeleteSaved(s.id)}
+                              className="text-gray-300 hover:text-red-400 transition-colors text-base leading-none"
+                              title="삭제"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        </div>
+                        <p className="text-sm text-black leading-relaxed whitespace-pre-wrap bg-gray-50 rounded-lg p-3">
+                          {s.발화}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </>
         )}
 
         {/* ── 상담 진행 화면 ── */}
         {started && !done && currentModule && (
           <>
-            {/* 상단 바 */}
-            <div className="flex items-center justify-between mb-4">
-              <button
-                onClick={history.length > 0 ? handleBack : () => setStarted(false)}
-                className="text-sm text-black bg-white border border-gray-300 rounded-lg px-3 py-1.5 hover:bg-gray-100 transition-colors"
-              >
-                ← {history.length > 0 ? "이전 모듈" : "처음으로"}
-              </button>
-
-              {/* 진행 히스토리 요약 */}
+            <div className="flex items-center gap-2 mb-4">
               {history.length > 0 && (
-                <p className="text-xs text-black">
+                <button
+                  onClick={handleBack}
+                  className="text-sm text-black bg-white border border-gray-300 rounded-lg px-3 py-1.5 hover:bg-gray-100 transition-colors whitespace-nowrap"
+                >
+                  ← 이전 모듈
+                </button>
+              )}
+              <button
+                onClick={() => { setStarted(false); setDone(false); setHistory([]); }}
+                className="text-sm text-black bg-white border border-gray-300 rounded-lg px-3 py-1.5 hover:bg-gray-100 transition-colors whitespace-nowrap"
+              >
+                ⌂ 첫 화면
+              </button>
+              {history.length > 0 && (
+                <p className="text-xs text-black truncate">
                   {history.map((h) => h.module.모듈명).join(" › ")} › <span className="font-semibold">{currentModule.모듈명}</span>
                 </p>
               )}
             </div>
 
-            {/* 모듈 카드 */}
             <div className="bg-white rounded-2xl border border-gray-300 overflow-hidden mb-4">
-              {/* 모듈 헤더 */}
               <div className="bg-blue-600 px-5 py-3 flex items-center justify-between">
                 <div>
                   <p className="text-xs text-blue-100">{CF_LABELS[currentModule.cf] ?? currentModule.cf}</p>
                   <p className="text-base font-bold text-white">{currentModule.모듈명}</p>
                   <p className="text-xs text-blue-200">{currentModule.모듈코드}</p>
                 </div>
-                {/* 고객 정보 배지 */}
                 {(customerName || gender || age) && (
                   <div className="text-right text-xs text-blue-100 space-y-0.5">
                     {customerName && <p>{customerName}님</p>}
@@ -453,17 +608,29 @@ export default function Home() {
                 )}
               </div>
 
-              {/* 발화 */}
               <div className="p-5">
                 <div className="flex items-start justify-between gap-3 mb-1">
                   <p className="text-xs font-semibold text-black">발화 스크립트</p>
-                  <button
-                    onClick={handleReroll}
-                    title="다른 발화로 다시 뽑기"
-                    className="text-xs text-blue-600 hover:text-blue-800 whitespace-nowrap flex-shrink-0"
-                  >
-                    ↻ 다시 뽑기
-                  </button>
+                  <div className="flex items-center gap-3 flex-shrink-0">
+                    <button
+                      onClick={handleSave}
+                      disabled={isAlreadySaved}
+                      title={isAlreadySaved ? "이미 저장됨" : "발화 저장"}
+                      className={`text-sm transition-colors ${
+                        isAlreadySaved
+                          ? "text-yellow-400 cursor-default"
+                          : "text-gray-300 hover:text-yellow-400"
+                      }`}
+                    >
+                      ★
+                    </button>
+                    <button
+                      onClick={handleReroll}
+                      className="text-xs text-blue-600 hover:text-blue-800 whitespace-nowrap"
+                    >
+                      ↻ 다시 뽑기
+                    </button>
+                  </div>
                 </div>
                 <p className="text-sm text-black leading-relaxed whitespace-pre-wrap bg-gray-50 rounded-lg p-4">
                   {currentScript}
@@ -471,38 +638,34 @@ export default function Home() {
               </div>
             </div>
 
-            {/* 고객 응답 선택 */}
             <div className="bg-white rounded-2xl border border-gray-300 p-5">
-              <p className="text-xs font-semibold text-black mb-3">
-                {currentBranches.length > 0 ? "고객 반응은?" : "다음 단계"}
-              </p>
-
-              {currentBranches.length > 0 ? (
-                <div className="space-y-2">
-                  {currentBranches.map((b, i) => (
-                    <button
-                      key={i}
-                      onClick={() => handleResponse(b)}
-                      className="w-full text-left rounded-xl border border-gray-200 px-4 py-3 hover:border-blue-400 hover:bg-blue-50 transition-colors group"
-                    >
-                      <p className="text-sm font-semibold text-black group-hover:text-blue-700">
-                        {b.응답유형}
-                      </p>
-                      <p className="text-xs text-black mt-0.5">
-                        → {b.다음모듈}
-                        {b.비고 && <span className="ml-2 text-gray-400">({b.비고})</span>}
-                      </p>
-                    </button>
-                  ))}
-                </div>
-              ) : (
-                <button
-                  onClick={handleNext}
-                  className="w-full py-3 rounded-xl bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 transition-colors"
-                >
-                  다음 모듈로 →
-                </button>
+              {currentBranches.length > 0 && (
+                <>
+                  <p className="text-xs font-semibold text-black mb-3">고객 반응은?</p>
+                  <div className="space-y-2 mb-3">
+                    {currentBranches.map((b, i) => (
+                      <button
+                        key={i}
+                        onClick={() => handleResponse(b)}
+                        className="w-full text-left rounded-xl border border-gray-200 px-4 py-3 hover:border-blue-400 hover:bg-blue-50 transition-colors group"
+                      >
+                        <p className="text-sm font-semibold text-black group-hover:text-blue-700">{b.응답유형}</p>
+                        <p className="text-xs text-black mt-0.5">
+                          → {b.다음모듈}
+                          {b.비고 && <span className="ml-2 text-gray-400">({b.비고})</span>}
+                        </p>
+                      </button>
+                    ))}
+                  </div>
+                  <hr className="border-gray-200 mb-3" />
+                </>
               )}
+              <button
+                onClick={handleNext}
+                className="w-full py-3 rounded-xl bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 transition-colors"
+              >
+                다음 모듈로 →
+              </button>
             </div>
           </>
         )}
