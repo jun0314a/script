@@ -11,6 +11,7 @@ interface Module {
   모듈코드: string;
   모듈명: string;
   발화목록: string[];
+  중요: boolean; // 엑셀 "중요" 컬럼에 값이 있으면 true
 }
 
 interface Branch {
@@ -95,18 +96,28 @@ function parseExcel(file: File): Promise<ParsedData> {
         // ── 시트3: 발화 스크립트 ──
         const scriptSheet = wb.Sheets[wb.SheetNames[2]];
         const scriptRows = XLSX.utils.sheet_to_json<Record<string, string>>(scriptSheet, { defval: "" });
+        // "중요" 컬럼은 발화 텍스트가 아니므로 스크립트 컬럼에서 제외
+        const RESERVED_COLS = ["CF", "상위 모듈", "모듈 코드", "모듈명", "중요"];
         const scriptCols = Object.keys(scriptRows[0] || {}).filter(
-          (k) => !["CF", "상위 모듈", "모듈 코드", "모듈명"].includes(k)
+          (k) => !RESERVED_COLS.includes(k)
         );
         const modules: Module[] = scriptRows
           .filter((r) => r["모듈명"])
-          .map((r) => ({
-            cf: r["CF"] || "",
-            상위모듈: r["상위 모듈"] || "",
-            모듈코드: r["모듈 코드"] || "",
-            모듈명: r["모듈명"] || "",
-            발화목록: scriptCols.map((c) => r[c]?.toString().trim()).filter(Boolean),
-          }))
+          .map((r) => {
+            // "중요" 컬럼: 비어있지 않고 N/no/false 가 아니면 중요로 간주
+            const rawImportant = r["중요"]?.toString().trim() ?? "";
+            const 중요 =
+              rawImportant !== "" &&
+              !["n", "no", "false", "아니오"].includes(rawImportant.toLowerCase());
+            return {
+              cf: r["CF"] || "",
+              상위모듈: r["상위 모듈"] || "",
+              모듈코드: r["모듈 코드"] || "",
+              모듈명: r["모듈명"] || "",
+              발화목록: scriptCols.map((c) => r[c]?.toString().trim()).filter(Boolean),
+              중요,
+            };
+          })
           .filter((m) => m.발화목록.length > 0);
 
         // ── 시트1: 분기 테이블 ──
@@ -513,54 +524,96 @@ export default function Home() {
 
             {/* ── 저장된 발화 탭 ── */}
             {homeTab === "저장" && (
-              <div className="bg-white rounded-2xl border border-gray-300 p-6 mb-6">
-                <div className="flex items-center justify-between mb-4">
-                  <h2 className="text-sm font-semibold text-black uppercase tracking-wide">저장된 발화</h2>
-                  {savedScripts.length > 0 && (
-                    <button
-                      onClick={handleClearAll}
-                      className="text-xs text-red-400 hover:text-red-600 transition-colors"
-                    >
-                      전체 삭제
-                    </button>
+              <div className="space-y-4 mb-6">
+
+                {/* 엑셀 중요 발화 섹션 */}
+                {parsedData && parsedData.modules.some((m) => m.중요) && (
+                  <div className="bg-white rounded-2xl border border-yellow-300 p-6">
+                    <div className="flex items-center gap-2 mb-4">
+                      <span className="text-yellow-400 text-sm">★</span>
+                      <h2 className="text-sm font-semibold text-black">엑셀 중요 발화</h2>
+                      <span className="ml-auto text-xs text-gray-400">
+                        파일에서 자동으로 불러온 중요 발화입니다.
+                      </span>
+                    </div>
+                    <div className="space-y-3">
+                      {parsedData.modules
+                        .filter((m) => m.중요)
+                        .map((m) => (
+                          <div key={m.모듈코드 || m.모듈명} className="rounded-xl border border-yellow-100 bg-yellow-50 p-4">
+                            <div className="flex items-center gap-2 mb-2">
+                              <span className="text-xs font-semibold text-yellow-700">{m.모듈명}</span>
+                              {m.모듈코드 && (
+                                <span className="text-xs text-gray-400">{m.모듈코드}</span>
+                              )}
+                            </div>
+                            <div className="space-y-2">
+                              {m.발화목록.map((line, i) => (
+                                <p
+                                  key={i}
+                                  className="text-sm text-black leading-relaxed whitespace-pre-wrap bg-white rounded-lg p-3 border border-yellow-100"
+                                >
+                                  {applyReplacements(line, info)}
+                                </p>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* ★ 직접 저장한 발화 섹션 */}
+                <div className="bg-white rounded-2xl border border-gray-300 p-6">
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="text-sm font-semibold text-black">직접 저장한 발화</h2>
+                    {savedScripts.length > 0 && (
+                      <button
+                        onClick={handleClearAll}
+                        className="text-xs text-red-400 hover:text-red-600 transition-colors"
+                      >
+                        전체 삭제
+                      </button>
+                    )}
+                  </div>
+
+                  {savedScripts.length === 0 ? (
+                    <div className="py-10 text-center">
+                      <p className="text-3xl mb-3">★</p>
+                      <p className="text-sm text-gray-400">아직 저장된 발화가 없습니다.</p>
+                      <p className="text-xs text-gray-400 mt-1">상담 중 ★ 버튼을 눌러 발화를 저장하세요.</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {savedScripts.map((s) => (
+                        <div key={s.id} className="rounded-xl border border-gray-200 p-4">
+                          <div className="flex items-start justify-between gap-2 mb-2">
+                            <div>
+                              <span className="text-xs font-semibold text-blue-600">{s.모듈명}</span>
+                              {s.모듈코드 && (
+                                <span className="ml-2 text-xs text-gray-400">{s.모듈코드}</span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-2 flex-shrink-0">
+                              <span className="text-xs text-gray-400">{formatDate(s.savedAt)}</span>
+                              <button
+                                onClick={() => handleDeleteSaved(s.id)}
+                                className="text-gray-300 hover:text-red-400 transition-colors text-base leading-none"
+                                title="삭제"
+                              >
+                                ✕
+                              </button>
+                            </div>
+                          </div>
+                          <p className="text-sm text-black leading-relaxed whitespace-pre-wrap bg-gray-50 rounded-lg p-3">
+                            {s.발화}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
                   )}
                 </div>
 
-                {savedScripts.length === 0 ? (
-                  <div className="py-12 text-center">
-                    <p className="text-3xl mb-3">★</p>
-                    <p className="text-sm text-gray-400">아직 저장된 발화가 없습니다.</p>
-                    <p className="text-xs text-gray-400 mt-1">상담 중 ★ 버튼을 눌러 발화를 저장하세요.</p>
-                  </div>
-                ) : (
-                  <div className="space-y-3">
-                    {savedScripts.map((s) => (
-                      <div key={s.id} className="rounded-xl border border-gray-200 p-4 relative group">
-                        <div className="flex items-start justify-between gap-2 mb-2">
-                          <div>
-                            <span className="text-xs font-semibold text-blue-600">{s.모듈명}</span>
-                            {s.모듈코드 && (
-                              <span className="ml-2 text-xs text-gray-400">{s.모듈코드}</span>
-                            )}
-                          </div>
-                          <div className="flex items-center gap-2 flex-shrink-0">
-                            <span className="text-xs text-gray-400">{formatDate(s.savedAt)}</span>
-                            <button
-                              onClick={() => handleDeleteSaved(s.id)}
-                              className="text-gray-300 hover:text-red-400 transition-colors text-base leading-none"
-                              title="삭제"
-                            >
-                              ✕
-                            </button>
-                          </div>
-                        </div>
-                        <p className="text-sm text-black leading-relaxed whitespace-pre-wrap bg-gray-50 rounded-lg p-3">
-                          {s.발화}
-                        </p>
-                      </div>
-                    ))}
-                  </div>
-                )}
               </div>
             )}
           </>
