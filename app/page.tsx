@@ -51,6 +51,12 @@ interface CustomerInfo {
   coverageRange: string;
   coverageAmount: string;
   coveragePeriod: string;
+  하위보험사: string;
+  유병력자: string;
+  생손보사: string;
+  ci: string;
+  우체국: string;
+  실손: string;
 }
 
 // ─── 상수 ────────────────────────────────────────────────────────────────────
@@ -167,13 +173,29 @@ const FIELD_MODULE_PATTERNS: { field: keyof CustomerInfo; patterns: string[] }[]
   { field: "coverageRange",  patterns: ["보장범위"] },
   { field: "coverageAmount", patterns: ["보장금액"] },
   { field: "coveragePeriod", patterns: ["보장기간", "납입기간"] },
+  { field: "하위보험사",       patterns: ["하위보험사", "하위 보험사"] },
+  { field: "유병력자",         patterns: ["유병력자"] },
+  { field: "생손보사",         patterns: ["생보사", "손보사", "생/손보사"] },
+  { field: "ci",             patterns: ["CI"] },
+  { field: "우체국",           patterns: ["우체국"] },
 ];
 
+const 실손_세대 = ["1세대", "2세대", "3세대", "4세대"];
+
 function shouldShowModule(module: Module, info: CustomerInfo): boolean {
+  // 일반 이진 필드: 선택 안함이면 관련 모듈 숨김
   for (const { field, patterns } of FIELD_MODULE_PATTERNS) {
     const isRelated = patterns.some((p) => module.모듈명.includes(p));
     if (isRelated && !info[field]) return false;
   }
+
+  // 실손 세대 필터: 실손 관련 모듈은 세대별로 처리
+  if (module.모듈명.includes("실손")) {
+    if (!info.실손) return false; // 선택 안함 → 모든 실손 모듈 숨김
+    const moduleGen = 실손_세대.find((g) => module.모듈명.includes(g));
+    if (moduleGen && moduleGen !== info.실손) return false; // 다른 세대 → 숨김
+  }
+
   return true;
 }
 
@@ -237,10 +259,17 @@ export default function Home() {
   const [coverageRange, setCoverageRange] = useState("");
   const [coverageAmount, setCoverageAmount] = useState("");
   const [coveragePeriod, setCoveragePeriod] = useState("");
+  const [하위보험사, set하위보험사] = useState("");
+  const [유병력자, set유병력자] = useState("");
+  const [생손보사, set생손보사] = useState("");
+  const [ci, setCi] = useState("");
+  const [우체국, set우체국] = useState("");
+  const [실손, set실손] = useState("");
 
   const info: CustomerInfo = {
     customerName, gender, age, consultantName,
     renewalType, coverageRange, coverageAmount, coveragePeriod,
+    하위보험사, 유병력자, 생손보사, ci, 우체국, 실손,
   };
 
   const [started, setStarted] = useState(false);
@@ -494,6 +523,51 @@ export default function Home() {
                       <select value={coveragePeriod} onChange={(e) => setCoveragePeriod(e.target.value)} className={INPUT_CLS}>
                         <option value="">선택 안함</option>
                         <option value="짧음">짧음</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-black mb-1">하위보험사</label>
+                      <select value={하위보험사} onChange={(e) => set하위보험사(e.target.value)} className={INPUT_CLS}>
+                        <option value="">선택 안함</option>
+                        <option value="있음">있음</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-black mb-1">유병력자 보험</label>
+                      <select value={유병력자} onChange={(e) => set유병력자(e.target.value)} className={INPUT_CLS}>
+                        <option value="">선택 안함</option>
+                        <option value="보유">보유</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-black mb-1">생/손보사</label>
+                      <select value={생손보사} onChange={(e) => set생손보사(e.target.value)} className={INPUT_CLS}>
+                        <option value="">선택 안함</option>
+                        <option value="문제 있음">문제 있음</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-black mb-1">CI</label>
+                      <select value={ci} onChange={(e) => setCi(e.target.value)} className={INPUT_CLS}>
+                        <option value="">선택 안함</option>
+                        <option value="보유">보유</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-black mb-1">우체국</label>
+                      <select value={우체국} onChange={(e) => set우체국(e.target.value)} className={INPUT_CLS}>
+                        <option value="">선택 안함</option>
+                        <option value="보유">보유</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-black mb-1">실손</label>
+                      <select value={실손} onChange={(e) => set실손(e.target.value)} className={INPUT_CLS}>
+                        <option value="">선택 안함</option>
+                        <option value="1세대">1세대</option>
+                        <option value="2세대">2세대</option>
+                        <option value="3세대">3세대</option>
+                        <option value="4세대">4세대</option>
                       </select>
                     </div>
                   </div>
