@@ -658,8 +658,8 @@ export default function Home() {
                     </div>
                     {searchResults.length > 0 && (
                       <div className="mt-3 space-y-2 max-h-64 overflow-y-auto">
-                        {searchResults.map((m) => (
-                          <button key={m.모듈코드 || m.모듈명} onClick={() => handleStart(m)}
+                        {searchResults.map((m, i) => (
+                          <button key={`search-${i}-${m.모듈코드}`} onClick={() => handleStart(m)}
                             className="w-full text-left rounded-xl border border-gray-200 px-3 py-2.5 hover:border-blue-400 hover:bg-blue-50 transition-colors">
                             <p className="text-xs font-semibold text-black">{m.모듈명}</p>
                             <p className="text-xs text-gray-400 mt-0.5 truncate">
@@ -724,8 +724,8 @@ export default function Home() {
                       <span className="ml-auto text-xs text-gray-400">파일에서 자동으로 불러온 중요 발화입니다.</span>
                     </div>
                     <div className="space-y-3">
-                      {parsedData.modules.filter((m) => m.중요).map((m) => (
-                        <div key={m.모듈코드 || m.모듈명} className="rounded-xl border border-yellow-100 bg-yellow-50 p-4">
+                      {parsedData.modules.filter((m) => m.중요).map((m, i) => (
+                        <div key={`important-${i}-${m.모듈코드}`} className="rounded-xl border border-yellow-100 bg-yellow-50 p-4">
                           <div className="flex items-center gap-2 mb-2">
                             <span className="text-xs font-semibold text-yellow-700">{m.모듈명}</span>
                             {m.모듈코드 && <span className="text-xs text-gray-400">{m.모듈코드}</span>}
