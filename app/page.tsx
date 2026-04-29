@@ -11,7 +11,7 @@ interface Module {
   모듈코드: string;
   모듈명: string;
   발화목록: string[];
-  중요: boolean; // 엑셀 "중요" 컬럼에 값이 있으면 true
+  중요: boolean;
 }
 
 interface Branch {
@@ -30,7 +30,7 @@ interface CustomImportant {
 interface ParsedData {
   modules: Module[];
   branches: Branch[];
-  customImportant: CustomImportant[]; // "중요발화" 시트에서 읽어온 직접 작성 발화
+  customImportant: CustomImportant[];
 }
 
 interface SavedScript {
@@ -59,6 +59,12 @@ interface CustomerInfo {
   실손: string;
 }
 
+interface CustomerProfile extends CustomerInfo {
+  id: string;
+  profileName: string;
+  savedAt: string;
+}
+
 // ─── 상수 ────────────────────────────────────────────────────────────────────
 
 const CF_LABELS: Record<string, string> = {
@@ -72,7 +78,9 @@ const CF_LABELS: Record<string, string> = {
 const INPUT_CLS =
   "w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-black focus:outline-none focus:ring-2 focus:ring-blue-400 bg-white";
 
-const STORAGE_KEY = "savedScripts_v1";
+const STORAGE_KEY   = "savedScripts_v1";
+const PROFILES_KEY  = "customerProfiles_v1";
+const EDITS_KEY     = "scriptEdits_v1";
 
 // ─── 이름 치환 ────────────────────────────────────────────────────────────────
 
@@ -108,15 +116,11 @@ function parseExcel(file: File): Promise<ParsedData> {
         // ── 시트3: 발화 스크립트 ──
         const scriptSheet = wb.Sheets[wb.SheetNames[2]];
         const scriptRows = XLSX.utils.sheet_to_json<Record<string, string>>(scriptSheet, { defval: "" });
-        // "중요" 컬럼은 발화 텍스트가 아니므로 스크립트 컬럼에서 제외
         const RESERVED_COLS = ["CF", "상위 모듈", "모듈 코드", "모듈명", "중요"];
-        const scriptCols = Object.keys(scriptRows[0] || {}).filter(
-          (k) => !RESERVED_COLS.includes(k)
-        );
+        const scriptCols = Object.keys(scriptRows[0] || {}).filter((k) => !RESERVED_COLS.includes(k));
         const modules: Module[] = scriptRows
           .filter((r) => r["모듈명"])
           .map((r) => {
-            // "중요" 컬럼: 비어있지 않고 N/no/false 가 아니면 중요로 간주
             const rawImportant = r["중요"]?.toString().trim() ?? "";
             const 중요 =
               rawImportant !== "" &&
@@ -145,7 +149,7 @@ function parseExcel(file: File): Promise<ParsedData> {
             비고: r["비고"] || "",
           }));
 
-        // ── "중요발화" 시트: 직접 작성한 중요 발화 (없으면 빈 배열)
+        // ── "중요발화" 시트 ──
         const customSheet = wb.Sheets["중요발화"];
         const customImportant: CustomImportant[] = customSheet
           ? XLSX.utils.sheet_to_json<Record<string, string>>(customSheet, { defval: "" })
@@ -166,7 +170,7 @@ function parseExcel(file: File): Promise<ParsedData> {
   });
 }
 
-// ─── 모듈 필터링 (선택 안한 항목 관련 모듈 제외) ────────────────────────────────
+// ─── 모듈 필터링 ──────────────────────────────────────────────────────────────
 
 const FIELD_MODULE_PATTERNS: { field: keyof CustomerInfo; patterns: string[] }[] = [
   { field: "renewalType",    patterns: ["갱신형"] },
@@ -183,27 +187,19 @@ const FIELD_MODULE_PATTERNS: { field: keyof CustomerInfo; patterns: string[] }[]
 const 실손_세대 = ["1세대", "2세대", "3세대", "4세대"];
 
 function shouldShowModule(module: Module, info: CustomerInfo): boolean {
-  // 일반 이진 필드: 선택 안함이면 관련 모듈 숨김
   for (const { field, patterns } of FIELD_MODULE_PATTERNS) {
     const isRelated = patterns.some((p) => module.모듈명.includes(p));
     if (isRelated && !info[field]) return false;
   }
-
-  // 실손 세대 필터: 실손 관련 모듈은 세대별로 처리
   if (module.모듈명.includes("실손")) {
-    if (!info.실손) return false; // 선택 안함 → 모든 실손 모듈 숨김
+    if (!info.실손) return false;
     const moduleGen = 실손_세대.find((g) => module.모듈명.includes(g));
-    if (moduleGen && moduleGen !== info.실손) return false; // 다른 세대 → 숨김
+    if (moduleGen && moduleGen !== info.실손) return false;
   }
-
   return true;
 }
 
-function findNextVisible(
-  fromModule: Module,
-  modules: Module[],
-  info: CustomerInfo
-): Module | undefined {
+function findNextVisible(fromModule: Module, modules: Module[], info: CustomerInfo): Module | undefined {
   const idx = modules.findIndex((m) => m.모듈명 === fromModule.모듈명);
   for (let i = idx + 1; i < modules.length; i++) {
     if (shouldShowModule(modules[i], info)) return modules[i];
@@ -211,17 +207,10 @@ function findNextVisible(
   return undefined;
 }
 
-// ─── 모듈 검색 (유사 이름 매칭) ──────────────────────────────────────────────
-
 function findModule(targetName: string, modules: Module[]): Module | undefined {
-  const name = targetName.includes("→")
-    ? targetName.split("→").pop()!.trim()
-    : targetName.trim();
-
-  return (
-    modules.find((m) => m.모듈명 === name) ||
-    modules.find((m) => m.모듈명.includes(name) || name.includes(m.모듈명))
-  );
+  const name = targetName.includes("→") ? targetName.split("→").pop()!.trim() : targetName.trim();
+  return modules.find((m) => m.모듈명 === name) ||
+    modules.find((m) => m.모듈명.includes(name) || name.includes(m.모듈명));
 }
 
 function getBranches(moduleName: string, branches: Branch[]): Branch[] {
@@ -230,12 +219,12 @@ function getBranches(moduleName: string, branches: Branch[]): Branch[] {
   );
 }
 
-function pickScript(module: Module, info: CustomerInfo): string {
-  const line = module.발화목록[Math.floor(Math.random() * module.발화목록.length)];
-  return applyReplacements(line, info);
+// edits가 있으면 수정본 사용, 없으면 원본 사용
+function pickScript(module: Module, info: CustomerInfo, edits: Record<string, string[]>): string {
+  const lines = edits[module.모듈코드] ?? module.발화목록;
+  if (!lines.length) return "";
+  return applyReplacements(lines[Math.floor(Math.random() * lines.length)], info);
 }
-
-// ─── 날짜 포맷 ────────────────────────────────────────────────────────────────
 
 function formatDate(iso: string): string {
   const d = new Date(iso);
@@ -245,26 +234,28 @@ function formatDate(iso: string): string {
 // ─── 컴포넌트 ─────────────────────────────────────────────────────────────────
 
 export default function Home() {
-  const [parsedData, setParsedData] = useState<ParsedData | null>(null);
-  const [fileName, setFileName] = useState("");
-  const [fileError, setFileError] = useState("");
-  const [dragging, setDragging] = useState(false);
+  // ── 파일 ──
+  const [parsedData, setParsedData]   = useState<ParsedData | null>(null);
+  const [fileName, setFileName]       = useState("");
+  const [fileError, setFileError]     = useState("");
+  const [dragging, setDragging]       = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const [customerName, setCustomerName] = useState("");
-  const [gender, setGender] = useState("");
-  const [age, setAge] = useState("");
+  // ── 고객 정보 ──
+  const [customerName,   setCustomerName]   = useState("");
+  const [gender,         setGender]         = useState("");
+  const [age,            setAge]            = useState("");
   const [consultantName, setConsultantName] = useState("");
-  const [renewalType, setRenewalType] = useState("");
-  const [coverageRange, setCoverageRange] = useState("");
+  const [renewalType,    setRenewalType]    = useState("");
+  const [coverageRange,  setCoverageRange]  = useState("");
   const [coverageAmount, setCoverageAmount] = useState("");
   const [coveragePeriod, setCoveragePeriod] = useState("");
   const [하위보험사, set하위보험사] = useState("");
-  const [유병력자, set유병력자] = useState("");
-  const [생손보사, set생손보사] = useState("");
-  const [ci, setCi] = useState("");
-  const [우체국, set우체국] = useState("");
-  const [실손, set실손] = useState("");
+  const [유병력자,   set유병력자]   = useState("");
+  const [생손보사,   set생손보사]   = useState("");
+  const [ci,         setCi]         = useState("");
+  const [우체국,     set우체국]     = useState("");
+  const [실손,       set실손]       = useState("");
 
   const info: CustomerInfo = {
     customerName, gender, age, consultantName,
@@ -272,69 +263,137 @@ export default function Home() {
     하위보험사, 유병력자, 생손보사, ci, 우체국, 실손,
   };
 
-  const [started, setStarted] = useState(false);
+  // ── 상담 흐름 ──
+  const [started,       setStarted]       = useState(false);
   const [currentModule, setCurrentModule] = useState<Module | null>(null);
   const [currentScript, setCurrentScript] = useState("");
-  const [history, setHistory] = useState<{ module: Module; script: string }[]>([]);
-  const [done, setDone] = useState(false);
+  const [history,       setHistory]       = useState<{ module: Module; script: string }[]>([]);
+  const [done,          setDone]          = useState(false);
 
-  // ── 홈 탭 (상담 | 저장된 발화) ──
+  // ── 홈 탭 ──
   const [homeTab, setHomeTab] = useState<"상담" | "저장">("상담");
 
-  // ── 저장된 발화 (localStorage 동기화) ──
+  // ── 저장된 발화 ──
   const [savedScripts, setSavedScripts] = useState<SavedScript[]>([]);
 
+  // ── 고객 프로필 ──
+  const [customerProfiles,  setCustomerProfiles]  = useState<CustomerProfile[]>([]);
+  const [profileName,       setProfileName]        = useState("");
+  const [showProfileSave,   setShowProfileSave]    = useState(false);
+  const [selectedProfileId, setSelectedProfileId]  = useState("");
+
+  // ── 스크립트 편집 ──
+  const [scriptEdits,   setScriptEdits]   = useState<Record<string, string[]>>({});
+  const [editingModule, setEditingModule] = useState<string | null>(null);
+  const [editLines,     setEditLines]     = useState<string[]>([]);
+
+  // ── 검색 ──
+  const [searchQuery, setSearchQuery] = useState("");
+
+  // ── localStorage 초기화 ──
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) setSavedScripts(JSON.parse(raw));
-    } catch {
-      // ignore
-    }
+    try { const r = localStorage.getItem(STORAGE_KEY);  if (r) setSavedScripts(JSON.parse(r));    } catch {}
+    try { const r = localStorage.getItem(PROFILES_KEY); if (r) setCustomerProfiles(JSON.parse(r)); } catch {}
+    try { const r = localStorage.getItem(EDITS_KEY);    if (r) setScriptEdits(JSON.parse(r));      } catch {}
   }, []);
 
+  // ── 저장된 발화 ──
   function persistSaved(next: SavedScript[]) {
     setSavedScripts(next);
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-    } catch {
-      // ignore
-    }
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(next)); } catch {}
   }
-
   function handleSave() {
     if (!currentModule || !currentScript) return;
-    // 동일 발화 중복 저장 방지
     if (savedScripts.some((s) => s.발화 === currentScript && s.모듈명 === currentModule.모듈명)) return;
-    const newItem: SavedScript = {
+    persistSaved([{
       id: Date.now().toString(),
       모듈명: currentModule.모듈명,
       모듈코드: currentModule.모듈코드,
       cf: currentModule.cf,
       발화: currentScript,
       savedAt: new Date().toISOString(),
-    };
-    persistSaved([newItem, ...savedScripts]);
+    }, ...savedScripts]);
   }
-
-  function handleDeleteSaved(id: string) {
-    persistSaved(savedScripts.filter((s) => s.id !== id));
-  }
-
-  function handleClearAll() {
-    if (confirm("저장된 발화를 모두 삭제할까요?")) persistSaved([]);
-  }
-
-  // 현재 스크립트가 이미 저장됐는지
-  const isAlreadySaved =
-    !!currentModule &&
+  function handleDeleteSaved(id: string) { persistSaved(savedScripts.filter((s) => s.id !== id)); }
+  function handleClearAll() { if (confirm("저장된 발화를 모두 삭제할까요?")) persistSaved([]); }
+  const isAlreadySaved = !!currentModule &&
     savedScripts.some((s) => s.발화 === currentScript && s.모듈명 === currentModule.모듈명);
+
+  // ── 고객 프로필 ──
+  function persistProfiles(next: CustomerProfile[]) {
+    setCustomerProfiles(next);
+    try { localStorage.setItem(PROFILES_KEY, JSON.stringify(next)); } catch {}
+  }
+  function handleSaveProfile() {
+    if (!profileName.trim()) return;
+    persistProfiles([{
+      id: Date.now().toString(),
+      profileName: profileName.trim(),
+      savedAt: new Date().toISOString(),
+      ...info,
+    }, ...customerProfiles]);
+    setProfileName("");
+    setShowProfileSave(false);
+  }
+  function handleLoadProfile() {
+    const p = customerProfiles.find((p) => p.id === selectedProfileId);
+    if (!p) return;
+    setCustomerName(p.customerName);
+    setGender(p.gender);
+    setAge(p.age);
+    setConsultantName(p.consultantName);
+    setRenewalType(p.renewalType);
+    setCoverageRange(p.coverageRange);
+    setCoverageAmount(p.coverageAmount);
+    setCoveragePeriod(p.coveragePeriod);
+    set하위보험사(p.하위보험사);
+    set유병력자(p.유병력자);
+    set생손보사(p.생손보사);
+    setCi(p.ci);
+    set우체국(p.우체국);
+    set실손(p.실손);
+  }
+  function handleDeleteProfile(id: string) {
+    persistProfiles(customerProfiles.filter((p) => p.id !== id));
+    if (selectedProfileId === id) setSelectedProfileId("");
+  }
+
+  // ── 스크립트 편집 ──
+  function persistEdits(next: Record<string, string[]>) {
+    setScriptEdits(next);
+    try { localStorage.setItem(EDITS_KEY, JSON.stringify(next)); } catch {}
+  }
+  function startEditing(module: Module) {
+    setEditingModule(module.모듈코드);
+    setEditLines([...(scriptEdits[module.모듈코드] ?? module.발화목록)]);
+  }
+  function saveEdits() {
+    if (!currentModule) return;
+    const cleaned = editLines.filter((l) => l.trim());
+    persistEdits({ ...scriptEdits, [currentModule.모듈코드]: cleaned });
+    setEditingModule(null);
+  }
+  function resetModuleEdits() {
+    if (!currentModule) return;
+    const next = { ...scriptEdits };
+    delete next[currentModule.모듈코드];
+    persistEdits(next);
+    setEditingModule(null);
+  }
+  const isEditing = !!currentModule && editingModule === currentModule.모듈코드;
+
+  // ── 검색 ──
+  const searchResults = searchQuery.trim() && parsedData
+    ? parsedData.modules.filter((m) =>
+        m.모듈명.includes(searchQuery) ||
+        (scriptEdits[m.모듈코드] ?? m.발화목록).some((line) => line.includes(searchQuery))
+      )
+    : [];
 
   // ── 파일 ──
   const handleFile = useCallback(async (file: File) => {
     if (!file.name.match(/\.(xlsx|xls)$/i)) {
-      setFileError("엑셀 파일(.xlsx, .xls)만 업로드 가능합니다.");
-      return;
+      setFileError("엑셀 파일(.xlsx, .xls)만 업로드 가능합니다."); return;
     }
     setFileError("");
     try {
@@ -343,70 +402,48 @@ export default function Home() {
       setFileName(file.name);
       setStarted(false);
       setDone(false);
-    } catch (e) {
-      setFileError((e as Error).message);
-    }
+    } catch (e) { setFileError((e as Error).message); }
   }, []);
 
-  const handleDrop = useCallback(
-    (e: React.DragEvent) => {
-      e.preventDefault();
-      setDragging(false);
-      if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
-    },
-    [handleFile]
-  );
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault(); setDragging(false);
+    if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+  }, [handleFile]);
 
-  function handleStart() {
+  // ── 상담 흐름 ──
+  function handleStart(fromModule?: Module) {
     if (!parsedData) return;
-    const first = parsedData.modules.find((m) => shouldShowModule(m, info));
+    const first = fromModule ?? parsedData.modules.find((m) => shouldShowModule(m, info));
     if (!first) return;
     setCurrentModule(first);
-    setCurrentScript(pickScript(first, info));
+    setCurrentScript(pickScript(first, info, scriptEdits));
     setHistory([]);
     setDone(false);
     setStarted(true);
+    setSearchQuery("");
   }
 
   function handleResponse(branch: Branch) {
     if (!parsedData || !currentModule) return;
     setHistory((h) => [...h, { module: currentModule, script: currentScript }]);
-
     const nextName = branch.다음모듈;
-    if (
-      nextName.includes("종료") ||
-      nextName.includes("CF1부터") ||
-      currentModule.모듈명 === "마무리 인사"
-    ) {
-      setDone(true);
-      return;
+    if (nextName.includes("종료") || nextName.includes("CF1부터") || currentModule.모듈명 === "마무리 인사") {
+      setDone(true); return;
     }
-
     const next = findModule(nextName, parsedData.modules);
-    const target = next && shouldShowModule(next, info)
-      ? next
-      : next
-        ? findNextVisible(next, parsedData.modules, info)
-        : findNextVisible(currentModule, parsedData.modules, info);
-
-    if (target) {
-      setCurrentModule(target);
-      setCurrentScript(pickScript(target, info));
-    } else {
-      setDone(true);
-    }
+    const target = next && shouldShowModule(next, info) ? next
+      : next ? findNextVisible(next, parsedData.modules, info)
+      : findNextVisible(currentModule, parsedData.modules, info);
+    if (target) { setCurrentModule(target); setCurrentScript(pickScript(target, info, scriptEdits)); }
+    else setDone(true);
   }
 
   function handleNext() {
     if (!parsedData || !currentModule) return;
     setHistory((h) => [...h, { module: currentModule, script: currentScript }]);
     const next = findNextVisible(currentModule, parsedData.modules, info);
-    if (next) {
-      setCurrentModule(next);
-      setCurrentScript(pickScript(next, info));
-    } else {
-      setDone(true);
-    }
+    if (next) { setCurrentModule(next); setCurrentScript(pickScript(next, info, scriptEdits)); }
+    else setDone(true);
   }
 
   function handleBack() {
@@ -420,12 +457,11 @@ export default function Home() {
 
   function handleReroll() {
     if (!currentModule) return;
-    setCurrentScript(pickScript(currentModule, info));
+    setCurrentScript(pickScript(currentModule, info, scriptEdits));
   }
 
   const currentBranches = parsedData && currentModule
-    ? getBranches(currentModule.모듈명, parsedData.branches)
-    : [];
+    ? getBranches(currentModule.모듈명, parsedData.branches) : [];
 
   return (
     <main className="min-h-screen py-10 px-4">
@@ -441,24 +477,12 @@ export default function Home() {
           <>
             {/* 탭 */}
             <div className="flex gap-1 mb-4 bg-gray-200 rounded-xl p-1">
-              <button
-                onClick={() => setHomeTab("상담")}
-                className={`flex-1 py-2 rounded-lg text-sm font-semibold transition-colors ${
-                  homeTab === "상담"
-                    ? "bg-white text-black shadow-sm"
-                    : "text-gray-500 hover:text-black"
-                }`}
-              >
+              <button onClick={() => setHomeTab("상담")}
+                className={`flex-1 py-2 rounded-lg text-sm font-semibold transition-colors ${homeTab === "상담" ? "bg-white text-black shadow-sm" : "text-gray-500 hover:text-black"}`}>
                 상담 시작
               </button>
-              <button
-                onClick={() => setHomeTab("저장")}
-                className={`flex-1 py-2 rounded-lg text-sm font-semibold transition-colors relative ${
-                  homeTab === "저장"
-                    ? "bg-white text-black shadow-sm"
-                    : "text-gray-500 hover:text-black"
-                }`}
-              >
+              <button onClick={() => setHomeTab("저장")}
+                className={`flex-1 py-2 rounded-lg text-sm font-semibold transition-colors ${homeTab === "저장" ? "bg-white text-black shadow-sm" : "text-gray-500 hover:text-black"}`}>
                 저장된 발화
                 {savedScripts.length > 0 && (
                   <span className="ml-1.5 inline-flex items-center justify-center w-5 h-5 rounded-full bg-blue-500 text-white text-xs font-bold">
@@ -471,8 +495,55 @@ export default function Home() {
             {/* ── 상담 탭 ── */}
             {homeTab === "상담" && (
               <>
+                {/* 고객 정보 입력 */}
                 <div className="bg-white rounded-2xl border border-gray-300 p-6 mb-4">
-                  <h2 className="text-sm font-semibold text-black uppercase tracking-wide mb-4">상담 정보 입력</h2>
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="text-sm font-semibold text-black uppercase tracking-wide">상담 정보 입력</h2>
+                    <div className="flex items-center gap-2">
+                      {/* 프로필 불러오기 */}
+                      {customerProfiles.length > 0 && (
+                        <div className="flex items-center gap-1.5">
+                          <select value={selectedProfileId} onChange={(e) => setSelectedProfileId(e.target.value)}
+                            className="text-xs border border-gray-300 rounded-lg px-2 py-1.5 text-black bg-white focus:outline-none">
+                            <option value="">프로필 선택</option>
+                            {customerProfiles.map((p) => (
+                              <option key={p.id} value={p.id}>{p.profileName}</option>
+                            ))}
+                          </select>
+                          <button onClick={handleLoadProfile} disabled={!selectedProfileId}
+                            className="text-xs bg-gray-100 border border-gray-300 rounded-lg px-2 py-1.5 text-black hover:bg-gray-200 disabled:opacity-40 disabled:cursor-not-allowed">
+                            불러오기
+                          </button>
+                          {selectedProfileId && (
+                            <button onClick={() => handleDeleteProfile(selectedProfileId)}
+                              className="text-xs text-red-400 hover:text-red-600" title="프로필 삭제">✕</button>
+                          )}
+                        </div>
+                      )}
+                      {/* 프로필 저장 토글 */}
+                      <button onClick={() => setShowProfileSave((v) => !v)}
+                        className="text-xs text-blue-600 hover:text-blue-800 border border-blue-200 rounded-lg px-2 py-1.5 bg-blue-50 whitespace-nowrap">
+                        프로필 저장
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* 프로필 저장 인라인 폼 */}
+                  {showProfileSave && (
+                    <div className="flex gap-2 mb-4 p-3 bg-blue-50 rounded-xl border border-blue-100">
+                      <input type="text" placeholder="프로필 이름 (예: 홍길동_25.01.01)"
+                        value={profileName} onChange={(e) => setProfileName(e.target.value)}
+                        onKeyDown={(e) => e.key === "Enter" && handleSaveProfile()}
+                        className="flex-1 rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-black focus:outline-none focus:ring-2 focus:ring-blue-400 bg-white" />
+                      <button onClick={handleSaveProfile} disabled={!profileName.trim()}
+                        className="text-sm bg-blue-600 text-white rounded-lg px-3 py-1.5 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed">
+                        저장
+                      </button>
+                      <button onClick={() => { setShowProfileSave(false); setProfileName(""); }}
+                        className="text-sm text-gray-500 hover:text-black">취소</button>
+                    </div>
+                  )}
+
                   <div className="grid grid-cols-2 gap-3">
                     <div>
                       <label className="block text-xs font-medium text-black mb-1">고객 이름</label>
@@ -573,6 +644,38 @@ export default function Home() {
                   </div>
                 </div>
 
+                {/* 검색 */}
+                {parsedData && (
+                  <div className="bg-white rounded-2xl border border-gray-300 p-4 mb-4">
+                    <div className="flex items-center gap-2">
+                      <span className="text-gray-400">🔍</span>
+                      <input type="text" placeholder="모듈명 또는 발화 내용 검색..."
+                        value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)}
+                        className="flex-1 text-sm text-black focus:outline-none bg-transparent placeholder-gray-400" />
+                      {searchQuery && (
+                        <button onClick={() => setSearchQuery("")} className="text-gray-400 hover:text-black text-sm">✕</button>
+                      )}
+                    </div>
+                    {searchResults.length > 0 && (
+                      <div className="mt-3 space-y-2 max-h-64 overflow-y-auto">
+                        {searchResults.map((m) => (
+                          <button key={m.모듈코드 || m.모듈명} onClick={() => handleStart(m)}
+                            className="w-full text-left rounded-xl border border-gray-200 px-3 py-2.5 hover:border-blue-400 hover:bg-blue-50 transition-colors">
+                            <p className="text-xs font-semibold text-black">{m.모듈명}</p>
+                            <p className="text-xs text-gray-400 mt-0.5 truncate">
+                              {(scriptEdits[m.모듈코드] ?? m.발화목록)[0]}
+                            </p>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {searchQuery.trim() && searchResults.length === 0 && (
+                      <p className="mt-3 text-xs text-gray-400">검색 결과가 없습니다.</p>
+                    )}
+                  </div>
+                )}
+
+                {/* 파일 업로드 */}
                 <div className="bg-white rounded-2xl border border-gray-300 p-6 mb-6">
                   <h2 className="text-sm font-semibold text-black uppercase tracking-wide mb-4">엑셀 파일 업로드</h2>
                   <div
@@ -600,13 +703,9 @@ export default function Home() {
                     )}
                   </div>
                   {fileError && <p className="mt-3 text-sm text-red-500">{fileError}</p>}
-
-                  <button
-                    onClick={handleStart}
-                    disabled={!parsedData}
+                  <button onClick={() => handleStart()} disabled={!parsedData}
                     className="mt-5 w-full py-3 rounded-lg text-sm font-semibold transition-colors
-                      bg-blue-600 text-white hover:bg-blue-700 disabled:bg-gray-200 disabled:text-black disabled:cursor-not-allowed"
-                  >
+                      bg-blue-600 text-white hover:bg-blue-700 disabled:bg-gray-200 disabled:text-black disabled:cursor-not-allowed">
                     {parsedData ? "상담 시작" : "파일을 먼저 업로드해주세요"}
                   </button>
                 </div>
@@ -616,45 +715,35 @@ export default function Home() {
             {/* ── 저장된 발화 탭 ── */}
             {homeTab === "저장" && (
               <div className="space-y-4 mb-6">
-
-                {/* 엑셀 중요 발화 섹션 */}
+                {/* 엑셀 중요 발화 */}
                 {parsedData && parsedData.modules.some((m) => m.중요) && (
                   <div className="bg-white rounded-2xl border border-yellow-300 p-6">
                     <div className="flex items-center gap-2 mb-4">
                       <span className="text-yellow-400 text-sm">★</span>
                       <h2 className="text-sm font-semibold text-black">엑셀 중요 발화</h2>
-                      <span className="ml-auto text-xs text-gray-400">
-                        파일에서 자동으로 불러온 중요 발화입니다.
-                      </span>
+                      <span className="ml-auto text-xs text-gray-400">파일에서 자동으로 불러온 중요 발화입니다.</span>
                     </div>
                     <div className="space-y-3">
-                      {parsedData.modules
-                        .filter((m) => m.중요)
-                        .map((m) => (
-                          <div key={m.모듈코드 || m.모듈명} className="rounded-xl border border-yellow-100 bg-yellow-50 p-4">
-                            <div className="flex items-center gap-2 mb-2">
-                              <span className="text-xs font-semibold text-yellow-700">{m.모듈명}</span>
-                              {m.모듈코드 && (
-                                <span className="text-xs text-gray-400">{m.모듈코드}</span>
-                              )}
-                            </div>
-                            <div className="space-y-2">
-                              {m.발화목록.map((line, i) => (
-                                <p
-                                  key={i}
-                                  className="text-sm text-black leading-relaxed whitespace-pre-wrap bg-white rounded-lg p-3 border border-yellow-100"
-                                >
-                                  {applyReplacements(line, info)}
-                                </p>
-                              ))}
-                            </div>
+                      {parsedData.modules.filter((m) => m.중요).map((m) => (
+                        <div key={m.모듈코드 || m.모듈명} className="rounded-xl border border-yellow-100 bg-yellow-50 p-4">
+                          <div className="flex items-center gap-2 mb-2">
+                            <span className="text-xs font-semibold text-yellow-700">{m.모듈명}</span>
+                            {m.모듈코드 && <span className="text-xs text-gray-400">{m.모듈코드}</span>}
                           </div>
-                        ))}
+                          <div className="space-y-2">
+                            {(scriptEdits[m.모듈코드] ?? m.발화목록).map((line, i) => (
+                              <p key={i} className="text-sm text-black leading-relaxed whitespace-pre-wrap bg-white rounded-lg p-3 border border-yellow-100">
+                                {applyReplacements(line, info)}
+                              </p>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
                     </div>
                   </div>
                 )}
 
-                {/* 중요발화 시트 섹션 */}
+                {/* 중요발화 시트 */}
                 {parsedData && parsedData.customImportant.length > 0 && (
                   <div className="bg-white rounded-2xl border border-blue-200 p-6">
                     <div className="flex items-center gap-2 mb-4">
@@ -665,9 +754,7 @@ export default function Home() {
                     <div className="space-y-3">
                       {parsedData.customImportant.map((item, i) => (
                         <div key={i} className="rounded-xl border border-blue-100 bg-blue-50 p-4">
-                          {item.제목 && (
-                            <p className="text-xs font-semibold text-blue-700 mb-2">{item.제목}</p>
-                          )}
+                          {item.제목 && <p className="text-xs font-semibold text-blue-700 mb-2">{item.제목}</p>}
                           <p className="text-sm text-black leading-relaxed whitespace-pre-wrap bg-white rounded-lg p-3 border border-blue-100">
                             {applyReplacements(item.내용, info)}
                           </p>
@@ -677,20 +764,14 @@ export default function Home() {
                   </div>
                 )}
 
-                {/* ★ 직접 저장한 발화 섹션 */}
+                {/* ★ 직접 저장한 발화 */}
                 <div className="bg-white rounded-2xl border border-gray-300 p-6">
                   <div className="flex items-center justify-between mb-4">
                     <h2 className="text-sm font-semibold text-black">직접 저장한 발화</h2>
                     {savedScripts.length > 0 && (
-                      <button
-                        onClick={handleClearAll}
-                        className="text-xs text-red-400 hover:text-red-600 transition-colors"
-                      >
-                        전체 삭제
-                      </button>
+                      <button onClick={handleClearAll} className="text-xs text-red-400 hover:text-red-600 transition-colors">전체 삭제</button>
                     )}
                   </div>
-
                   {savedScripts.length === 0 ? (
                     <div className="py-10 text-center">
                       <p className="text-3xl mb-3">★</p>
@@ -704,30 +785,20 @@ export default function Home() {
                           <div className="flex items-start justify-between gap-2 mb-2">
                             <div>
                               <span className="text-xs font-semibold text-blue-600">{s.모듈명}</span>
-                              {s.모듈코드 && (
-                                <span className="ml-2 text-xs text-gray-400">{s.모듈코드}</span>
-                              )}
+                              {s.모듈코드 && <span className="ml-2 text-xs text-gray-400">{s.모듈코드}</span>}
                             </div>
                             <div className="flex items-center gap-2 flex-shrink-0">
                               <span className="text-xs text-gray-400">{formatDate(s.savedAt)}</span>
-                              <button
-                                onClick={() => handleDeleteSaved(s.id)}
-                                className="text-gray-300 hover:text-red-400 transition-colors text-base leading-none"
-                                title="삭제"
-                              >
-                                ✕
-                              </button>
+                              <button onClick={() => handleDeleteSaved(s.id)}
+                                className="text-gray-300 hover:text-red-400 transition-colors text-base leading-none" title="삭제">✕</button>
                             </div>
                           </div>
-                          <p className="text-sm text-black leading-relaxed whitespace-pre-wrap bg-gray-50 rounded-lg p-3">
-                            {s.발화}
-                          </p>
+                          <p className="text-sm text-black leading-relaxed whitespace-pre-wrap bg-gray-50 rounded-lg p-3">{s.발화}</p>
                         </div>
                       ))}
                     </div>
                   )}
                 </div>
-
               </div>
             )}
           </>
@@ -738,17 +809,13 @@ export default function Home() {
           <>
             <div className="flex items-center gap-2 mb-4">
               {history.length > 0 && (
-                <button
-                  onClick={handleBack}
-                  className="text-sm text-black bg-white border border-gray-300 rounded-lg px-3 py-1.5 hover:bg-gray-100 transition-colors whitespace-nowrap"
-                >
+                <button onClick={handleBack}
+                  className="text-sm text-black bg-white border border-gray-300 rounded-lg px-3 py-1.5 hover:bg-gray-100 transition-colors whitespace-nowrap">
                   ← 이전 모듈
                 </button>
               )}
-              <button
-                onClick={() => { setStarted(false); setDone(false); setHistory([]); }}
-                className="text-sm text-black bg-white border border-gray-300 rounded-lg px-3 py-1.5 hover:bg-gray-100 transition-colors whitespace-nowrap"
-              >
+              <button onClick={() => { setStarted(false); setDone(false); setHistory([]); setEditingModule(null); }}
+                className="text-sm text-black bg-white border border-gray-300 rounded-lg px-3 py-1.5 hover:bg-gray-100 transition-colors whitespace-nowrap">
                 ⌂ 첫 화면
               </button>
               {history.length > 0 && (
@@ -776,32 +843,52 @@ export default function Home() {
               </div>
 
               <div className="p-5">
-                <div className="flex items-start justify-between gap-3 mb-1">
+                <div className="flex items-center justify-between gap-3 mb-3">
                   <p className="text-xs font-semibold text-black">발화 스크립트</p>
                   <div className="flex items-center gap-3 flex-shrink-0">
-                    <button
-                      onClick={handleSave}
-                      disabled={isAlreadySaved}
+                    <button onClick={handleSave} disabled={isAlreadySaved}
                       title={isAlreadySaved ? "이미 저장됨" : "발화 저장"}
-                      className={`text-sm transition-colors ${
-                        isAlreadySaved
-                          ? "text-yellow-400 cursor-default"
-                          : "text-gray-300 hover:text-yellow-400"
-                      }`}
-                    >
-                      ★
+                      className={`text-sm transition-colors ${isAlreadySaved ? "text-yellow-400 cursor-default" : "text-gray-300 hover:text-yellow-400"}`}>★</button>
+                    <button onClick={() => isEditing ? setEditingModule(null) : startEditing(currentModule)}
+                      className={`text-xs transition-colors ${isEditing ? "text-blue-600 font-semibold" : "text-gray-400 hover:text-blue-600"}`}>
+                      ✏️ {isEditing ? "취소" : "편집"}
                     </button>
-                    <button
-                      onClick={handleReroll}
-                      className="text-xs text-blue-600 hover:text-blue-800 whitespace-nowrap"
-                    >
-                      ↻ 다시 뽑기
-                    </button>
+                    {!isEditing && (
+                      <button onClick={handleReroll} className="text-xs text-blue-600 hover:text-blue-800 whitespace-nowrap">↻ 다시 뽑기</button>
+                    )}
                   </div>
                 </div>
-                <p className="text-sm text-black leading-relaxed whitespace-pre-wrap bg-gray-50 rounded-lg p-4">
-                  {currentScript}
-                </p>
+
+                {/* 편집 모드 */}
+                {isEditing ? (
+                  <div className="space-y-2">
+                    {editLines.map((line, i) => (
+                      <div key={i} className="flex gap-2">
+                        <textarea value={line} rows={3} onChange={(e) => {
+                            const next = [...editLines]; next[i] = e.target.value; setEditLines(next);
+                          }}
+                          className="flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm text-black focus:outline-none focus:ring-2 focus:ring-blue-400 bg-white resize-none" />
+                        <button onClick={() => setEditLines(editLines.filter((_, j) => j !== i))}
+                          className="text-gray-300 hover:text-red-400 text-lg self-start mt-1">✕</button>
+                      </div>
+                    ))}
+                    <button onClick={() => setEditLines([...editLines, ""])}
+                      className="text-xs text-blue-600 hover:text-blue-800">+ 발화 추가</button>
+                    <div className="flex gap-2 mt-2">
+                      <button onClick={saveEdits}
+                        className="flex-1 py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700">저장</button>
+                      <button onClick={resetModuleEdits}
+                        className="px-3 py-2 rounded-lg border border-gray-300 text-sm text-gray-500 hover:text-black">원본으로</button>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-sm text-black leading-relaxed whitespace-pre-wrap bg-gray-50 rounded-lg p-4">
+                    {currentScript}
+                    {scriptEdits[currentModule.모듈코드] && (
+                      <span className="ml-2 text-xs text-blue-400">(수정됨)</span>
+                    )}
+                  </p>
+                )}
               </div>
             </div>
 
@@ -811,11 +898,8 @@ export default function Home() {
                   <p className="text-xs font-semibold text-black mb-3">고객 반응은?</p>
                   <div className="space-y-2 mb-3">
                     {currentBranches.map((b, i) => (
-                      <button
-                        key={i}
-                        onClick={() => handleResponse(b)}
-                        className="w-full text-left rounded-xl border border-gray-200 px-4 py-3 hover:border-blue-400 hover:bg-blue-50 transition-colors group"
-                      >
+                      <button key={i} onClick={() => handleResponse(b)}
+                        className="w-full text-left rounded-xl border border-gray-200 px-4 py-3 hover:border-blue-400 hover:bg-blue-50 transition-colors group">
                         <p className="text-sm font-semibold text-black group-hover:text-blue-700">{b.응답유형}</p>
                         <p className="text-xs text-black mt-0.5">
                           → {b.다음모듈}
@@ -827,10 +911,8 @@ export default function Home() {
                   <hr className="border-gray-200 mb-3" />
                 </>
               )}
-              <button
-                onClick={handleNext}
-                className="w-full py-3 rounded-xl bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 transition-colors"
-              >
+              <button onClick={handleNext}
+                className="w-full py-3 rounded-xl bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 transition-colors">
                 다음 모듈로 →
               </button>
             </div>
@@ -842,20 +924,14 @@ export default function Home() {
           <div className="bg-white rounded-2xl border border-gray-300 p-10 text-center">
             <p className="text-2xl mb-2">🎉</p>
             <p className="text-lg font-bold text-black mb-1">상담 완료</p>
-            {customerName && (
-              <p className="text-sm text-black mb-6">{customerName}님과의 상담이 마무리되었습니다.</p>
-            )}
+            {customerName && <p className="text-sm text-black mb-6">{customerName}님과의 상담이 마무리되었습니다.</p>}
             <div className="flex gap-3 justify-center">
-              <button
-                onClick={handleBack}
-                className="px-5 py-2 rounded-lg border border-gray-300 text-sm font-medium text-black bg-white hover:bg-gray-100"
-              >
+              <button onClick={handleBack}
+                className="px-5 py-2 rounded-lg border border-gray-300 text-sm font-medium text-black bg-white hover:bg-gray-100">
                 ← 이전으로
               </button>
-              <button
-                onClick={() => { setStarted(false); setDone(false); setHistory([]); }}
-                className="px-5 py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700"
-              >
+              <button onClick={() => { setStarted(false); setDone(false); setHistory([]); }}
+                className="px-5 py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700">
                 새 상담 시작
               </button>
             </div>
