@@ -8,7 +8,7 @@ import {
   onSnapshot, setDoc, getDocs, query, orderBy, where,
 } from "firebase/firestore";
 import {
-  ref as storageRef, uploadBytes, getDownloadURL, deleteObject,
+  ref as storageRef, uploadBytes, getDownloadURL, deleteObject, getBytes,
 } from "firebase/storage";
 
 // ─── 타입 ────────────────────────────────────────────────────────────────────
@@ -316,9 +316,7 @@ export default function Home() {
   useEffect(() => {
     async function loadExcelFromStorage() {
       try {
-        const url = await getDownloadURL(storageRef(storage, "excel/scripts.xlsx"));
-        const res = await fetch(url);
-        const buffer = await res.arrayBuffer();
+        const buffer = await getBytes(storageRef(storage, "excel/scripts.xlsx"));
         const data = parseExcelFromBuffer(buffer);
         const metaSnap = await getDoc(doc(db, "config", "excelFile"));
         const meta = metaSnap.exists() ? metaSnap.data() : null;
