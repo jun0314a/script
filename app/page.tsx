@@ -65,6 +65,14 @@ interface CustomerProfile extends CustomerInfo {
   savedAt: string;
 }
 
+interface ModuleImage {
+  id: string;
+  moduleCode: string;
+  name: string;
+  dataUrl: string;
+  createdAt: string;
+}
+
 // ─── 상수 ────────────────────────────────────────────────────────────────────
 
 const CF_LABELS: Record<string, string> = {
@@ -226,6 +234,68 @@ function pickScript(module: Module, info: CustomerInfo, edits: Record<string, st
   return applyReplacements(lines[Math.floor(Math.random() * lines.length)], info);
 }
 
+// ─── IndexedDB (이미지 저장) ──────────────────────────────────────────────────
+
+const IDB_NAME    = "consultationApp";
+const IDB_VERSION = 1;
+const IDB_STORE   = "moduleImages";
+
+function openImageDB(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, IDB_VERSION);
+    req.onupgradeneeded = (e) => {
+      const db = (e.target as IDBOpenDBRequest).result;
+      if (!db.objectStoreNames.contains(IDB_STORE)) {
+        const store = db.createObjectStore(IDB_STORE, { keyPath: "id" });
+        store.createIndex("moduleCode", "moduleCode", { unique: false });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror   = () => reject(req.error);
+  });
+}
+
+async function dbGetImages(moduleCode: string): Promise<ModuleImage[]> {
+  const db  = await openImageDB();
+  return new Promise((resolve, reject) => {
+    const tx  = db.transaction(IDB_STORE, "readonly");
+    const idx = tx.objectStore(IDB_STORE).index("moduleCode");
+    const req = idx.getAll(moduleCode);
+    req.onsuccess = () => resolve(req.result ?? []);
+    req.onerror   = () => reject(req.error);
+  });
+}
+
+async function dbSaveImage(image: ModuleImage): Promise<void> {
+  const db = await openImageDB();
+  return new Promise((resolve, reject) => {
+    const tx  = db.transaction(IDB_STORE, "readwrite");
+    const req = tx.objectStore(IDB_STORE).put(image);
+    req.onsuccess = () => resolve();
+    req.onerror   = () => reject(req.error);
+  });
+}
+
+async function dbDeleteImage(id: string): Promise<void> {
+  const db = await openImageDB();
+  return new Promise((resolve, reject) => {
+    const tx  = db.transaction(IDB_STORE, "readwrite");
+    const req = tx.objectStore(IDB_STORE).delete(id);
+    req.onsuccess = () => resolve();
+    req.onerror   = () => reject(req.error);
+  });
+}
+
+function fileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = (e) => resolve(e.target!.result as string);
+    reader.readAsDataURL(file);
+  });
+}
+
+// ─── 날짜 포맷 ────────────────────────────────────────────────────────────────
+
 function formatDate(iso: string): string {
   const d = new Date(iso);
   return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
@@ -289,6 +359,41 @@ export default function Home() {
 
   // ── 검색 ──
   const [searchQuery, setSearchQuery] = useState("");
+
+  // ── 이미지 ──
+  const [moduleImages,    setModuleImages]    = useState<ModuleImage[]>([]);
+  const [lightboxImage,   setLightboxImage]   = useState<ModuleImage | null>(null);
+  const [showImgManager,  setShowImgManager]  = useState(false);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+
+  // ── 모듈 변경 시 이미지 로드 ──
+  useEffect(() => {
+    if (!currentModule) { setModuleImages([]); return; }
+    dbGetImages(currentModule.모듈코드).then(setModuleImages).catch(() => {});
+  }, [currentModule]);
+
+  async function handleImageUpload(files: FileList) {
+    if (!currentModule) return;
+    for (const file of Array.from(files)) {
+      if (!file.type.startsWith("image/")) continue;
+      const dataUrl = await fileToDataUrl(file);
+      const img: ModuleImage = {
+        id: `${Date.now()}-${Math.random()}`,
+        moduleCode: currentModule.모듈코드,
+        name: file.name,
+        dataUrl,
+        createdAt: new Date().toISOString(),
+      };
+      await dbSaveImage(img);
+      setModuleImages((prev) => [...prev, img]);
+    }
+  }
+
+  async function handleDeleteImage(id: string) {
+    await dbDeleteImage(id);
+    setModuleImages((prev) => prev.filter((img) => img.id !== id));
+    if (lightboxImage?.id === id) setLightboxImage(null);
+  }
 
   // ── localStorage 초기화 ──
   useEffect(() => {
@@ -892,6 +997,74 @@ export default function Home() {
               </div>
             </div>
 
+            {/* ── 이미지 섹션 ── */}
+            <div className="bg-white rounded-2xl border border-gray-300 overflow-hidden mb-4">
+              <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100">
+                <p className="text-xs font-semibold text-black">
+                  🖼 참고 이미지
+                  {moduleImages.length > 0 && (
+                    <span className="ml-2 text-gray-400">({moduleImages.length}장)</span>
+                  )}
+                </p>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setShowImgManager((v) => !v)}
+                    className={`text-xs transition-colors ${showImgManager ? "text-blue-600 font-semibold" : "text-gray-400 hover:text-blue-600"}`}
+                  >
+                    ✏️ {showImgManager ? "완료" : "관리"}
+                  </button>
+                  {showImgManager && (
+                    <>
+                      <input
+                        ref={imageInputRef}
+                        type="file"
+                        accept="image/*"
+                        multiple
+                        className="hidden"
+                        onChange={(e) => { if (e.target.files?.length) handleImageUpload(e.target.files); e.target.value = ""; }}
+                      />
+                      <button
+                        onClick={() => imageInputRef.current?.click()}
+                        className="text-xs bg-blue-600 text-white rounded-lg px-2 py-1 hover:bg-blue-700"
+                      >
+                        + 이미지 추가
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {moduleImages.length === 0 ? (
+                <div className="px-5 py-6 text-center">
+                  <p className="text-xs text-gray-400">
+                    {showImgManager ? '"+ 이미지 추가" 버튼으로 이미지를 등록하세요.' : "등록된 이미지가 없습니다."}
+                  </p>
+                </div>
+              ) : (
+                <div className="p-4 flex gap-3 overflow-x-auto">
+                  {moduleImages.map((img) => (
+                    <div key={img.id} className="relative flex-shrink-0">
+                      <img
+                        src={img.dataUrl}
+                        alt={img.name}
+                        onClick={() => setLightboxImage(img)}
+                        className="h-28 w-auto rounded-xl border border-gray-200 cursor-pointer hover:opacity-90 transition-opacity object-cover"
+                      />
+                      {showImgManager && (
+                        <button
+                          onClick={() => handleDeleteImage(img.id)}
+                          className="absolute -top-2 -right-2 w-5 h-5 rounded-full bg-red-500 text-white text-xs flex items-center justify-center hover:bg-red-600"
+                        >
+                          ✕
+                        </button>
+                      )}
+                      <p className="text-xs text-gray-400 mt-1 truncate max-w-24">{img.name}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
             <div className="bg-white rounded-2xl border border-gray-300 p-5">
               {currentBranches.length > 0 && (
                 <>
@@ -939,6 +1112,30 @@ export default function Home() {
         )}
 
       </div>
+
+      {/* ── 라이트박스 ── */}
+      {lightboxImage && (
+        <div
+          onClick={() => setLightboxImage(null)}
+          className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4"
+        >
+          <div className="relative max-w-4xl max-h-full" onClick={(e) => e.stopPropagation()}>
+            <img
+              src={lightboxImage.dataUrl}
+              alt={lightboxImage.name}
+              className="max-w-full max-h-[85vh] rounded-xl object-contain"
+            />
+            <p className="text-center text-white text-sm mt-2 opacity-70">{lightboxImage.name}</p>
+            <button
+              onClick={() => setLightboxImage(null)}
+              className="absolute -top-3 -right-3 w-8 h-8 rounded-full bg-white text-black text-sm font-bold flex items-center justify-center hover:bg-gray-200"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
+
     </main>
   );
 }
