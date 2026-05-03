@@ -82,7 +82,8 @@ interface LocalImage {
 // ],
 
 const MODULE_IMAGES: Record<string, LocalImage[]> = {
-  // 여기에 이미지를 등록하세요
+    "MD 3-1": [{ name: "신원증빙", src: "/images/sjcard.png" }],
+
 };
 
 // ─── 상수 ────────────────────────────────────────────────────────────────────
