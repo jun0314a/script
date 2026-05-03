@@ -4,7 +4,7 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import * as XLSX from "xlsx";
 import { db, storage } from "./lib/firebase";
 import {
-  collection, addDoc, deleteDoc, doc,
+  collection, addDoc, deleteDoc, doc, getDoc,
   onSnapshot, setDoc, getDocs, query, orderBy, where,
 } from "firebase/firestore";
 import {
@@ -118,58 +118,62 @@ function applyReplacements(text: string, info: CustomerInfo): string {
 
 // ─── 엑셀 파싱 ────────────────────────────────────────────────────────────────
 
+function parseExcelFromBuffer(buffer: ArrayBuffer): ParsedData {
+  const data = new Uint8Array(buffer);
+  const wb = XLSX.read(data, { type: "array" });
+
+  const scriptSheet = wb.Sheets[wb.SheetNames[2]];
+  const scriptRows = XLSX.utils.sheet_to_json<Record<string, string>>(scriptSheet, { defval: "" });
+  const RESERVED_COLS = ["CF", "상위 모듈", "모듈 코드", "모듈명", "중요"];
+  const scriptCols = Object.keys(scriptRows[0] || {}).filter((k) => !RESERVED_COLS.includes(k));
+  const modules: Module[] = scriptRows
+    .filter((r) => r["모듈명"])
+    .map((r) => {
+      const rawImportant = r["중요"]?.toString().trim() ?? "";
+      const 중요 = rawImportant !== "" &&
+        !["n", "no", "false", "아니오"].includes(rawImportant.toLowerCase());
+      return {
+        cf: r["CF"] || "",
+        상위모듈: r["상위 모듈"] || "",
+        모듈코드: r["모듈 코드"] || "",
+        모듈명: r["모듈명"] || "",
+        발화목록: scriptCols.map((c) => r[c]?.toString().trim()).filter(Boolean),
+        중요,
+      };
+    })
+    .filter((m) => m.발화목록.length > 0);
+
+  const branchSheet = wb.Sheets[wb.SheetNames[0]];
+  const branchRows = XLSX.utils.sheet_to_json<Record<string, string>>(branchSheet, { defval: "" });
+  const branches: Branch[] = branchRows
+    .filter((r) => r["현재 모듈명"] && r["고객 응답 유형"] && r["다음 모듈"])
+    .map((r) => ({
+      cf: r["CF"] || "",
+      모듈명: r["현재 모듈명"],
+      응답유형: r["고객 응답 유형"],
+      다음모듈: r["다음 모듈"],
+      비고: r["비고"] || "",
+    }));
+
+  const customSheet = wb.Sheets["중요발화"];
+  const customImportant: CustomImportant[] = customSheet
+    ? XLSX.utils.sheet_to_json<Record<string, string>>(customSheet, { defval: "" })
+        .filter((r) => r["내용"]?.toString().trim())
+        .map((r) => ({
+          제목: r["제목"]?.toString().trim() || "",
+          내용: r["내용"]?.toString().trim(),
+        }))
+    : [];
+
+  return { modules, branches, customImportant };
+}
+
 function parseExcel(file: File): Promise<ParsedData> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
-        const data = new Uint8Array(e.target!.result as ArrayBuffer);
-        const wb = XLSX.read(data, { type: "array" });
-
-        const scriptSheet = wb.Sheets[wb.SheetNames[2]];
-        const scriptRows = XLSX.utils.sheet_to_json<Record<string, string>>(scriptSheet, { defval: "" });
-        const RESERVED_COLS = ["CF", "상위 모듈", "모듈 코드", "모듈명", "중요"];
-        const scriptCols = Object.keys(scriptRows[0] || {}).filter((k) => !RESERVED_COLS.includes(k));
-        const modules: Module[] = scriptRows
-          .filter((r) => r["모듈명"])
-          .map((r) => {
-            const rawImportant = r["중요"]?.toString().trim() ?? "";
-            const 중요 = rawImportant !== "" &&
-              !["n", "no", "false", "아니오"].includes(rawImportant.toLowerCase());
-            return {
-              cf: r["CF"] || "",
-              상위모듈: r["상위 모듈"] || "",
-              모듈코드: r["모듈 코드"] || "",
-              모듈명: r["모듈명"] || "",
-              발화목록: scriptCols.map((c) => r[c]?.toString().trim()).filter(Boolean),
-              중요,
-            };
-          })
-          .filter((m) => m.발화목록.length > 0);
-
-        const branchSheet = wb.Sheets[wb.SheetNames[0]];
-        const branchRows = XLSX.utils.sheet_to_json<Record<string, string>>(branchSheet, { defval: "" });
-        const branches: Branch[] = branchRows
-          .filter((r) => r["현재 모듈명"] && r["고객 응답 유형"] && r["다음 모듈"])
-          .map((r) => ({
-            cf: r["CF"] || "",
-            모듈명: r["현재 모듈명"],
-            응답유형: r["고객 응답 유형"],
-            다음모듈: r["다음 모듈"],
-            비고: r["비고"] || "",
-          }));
-
-        const customSheet = wb.Sheets["중요발화"];
-        const customImportant: CustomImportant[] = customSheet
-          ? XLSX.utils.sheet_to_json<Record<string, string>>(customSheet, { defval: "" })
-              .filter((r) => r["내용"]?.toString().trim())
-              .map((r) => ({
-                제목: r["제목"]?.toString().trim() || "",
-                내용: r["내용"]?.toString().trim(),
-              }))
-          : [];
-
-        resolve({ modules, branches, customImportant });
+        resolve(parseExcelFromBuffer(e.target!.result as ArrayBuffer));
       } catch {
         reject(new Error("파일을 읽는 중 오류가 발생했습니다."));
       }
@@ -243,10 +247,12 @@ function formatDate(iso: string): string {
 
 export default function Home() {
   // ── 파일 ──
-  const [parsedData,  setParsedData]  = useState<ParsedData | null>(null);
-  const [fileName,    setFileName]    = useState("");
-  const [fileError,   setFileError]   = useState("");
-  const [dragging,    setDragging]    = useState(false);
+  const [parsedData,   setParsedData]   = useState<ParsedData | null>(null);
+  const [fileName,     setFileName]     = useState("");
+  const [fileError,    setFileError]    = useState("");
+  const [dragging,     setDragging]     = useState(false);
+  const [excelLoading, setExcelLoading] = useState(true);
+  const [excelUpdatedAt, setExcelUpdatedAt] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // ── 고객 정보 ──
@@ -305,6 +311,28 @@ export default function Home() {
   const [copiedImageId,  setCopiedImageId]  = useState<string | null>(null);
   const [uploadingImg,   setUploadingImg]   = useState(false);
   const imageInputRef = useRef<HTMLInputElement>(null);
+
+  // ── 앱 시작 시 Firebase Storage에서 엑셀 자동 로드 ──
+  useEffect(() => {
+    async function loadExcelFromStorage() {
+      try {
+        const url = await getDownloadURL(storageRef(storage, "excel/scripts.xlsx"));
+        const res = await fetch(url);
+        const buffer = await res.arrayBuffer();
+        const data = parseExcelFromBuffer(buffer);
+        const metaSnap = await getDoc(doc(db, "config", "excelFile"));
+        const meta = metaSnap.exists() ? metaSnap.data() : null;
+        setParsedData(data);
+        setFileName(meta?.fileName ?? "scripts.xlsx");
+        setExcelUpdatedAt(meta?.updatedAt ?? "");
+      } catch {
+        // Firebase에 엑셀 없음 → 첫 업로드 필요
+      } finally {
+        setExcelLoading(false);
+      }
+    }
+    loadExcelFromStorage();
+  }, []);
 
   // ── Firebase 실시간 리스너 ──
 
@@ -483,13 +511,29 @@ export default function Home() {
       setFileError("엑셀 파일(.xlsx, .xls)만 업로드 가능합니다."); return;
     }
     setFileError("");
+    setExcelLoading(true);
     try {
       const data = await parseExcel(file);
+      // Firebase Storage에 저장 (팀 전체 공유)
+      const sRef = storageRef(storage, "excel/scripts.xlsx");
+      await uploadBytes(sRef, file, {
+        contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+      const updatedAt = new Date().toISOString();
+      await setDoc(doc(db, "config", "excelFile"), {
+        fileName: file.name,
+        updatedAt,
+      });
       setParsedData(data);
       setFileName(file.name);
+      setExcelUpdatedAt(updatedAt);
       setStarted(false);
       setDone(false);
-    } catch (e) { setFileError((e as Error).message); }
+    } catch (e) {
+      setFileError((e as Error).message);
+    } finally {
+      setExcelLoading(false);
+    }
   }, []);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
@@ -759,36 +803,60 @@ export default function Home() {
 
                 {/* 파일 업로드 */}
                 <div className="bg-white rounded-2xl border border-gray-300 p-6 mb-6">
-                  <h2 className="text-sm font-semibold text-black uppercase tracking-wide mb-4">엑셀 파일 업로드</h2>
-                  <div
-                    onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
-                    onDragLeave={() => setDragging(false)}
-                    onDrop={handleDrop}
-                    onClick={() => fileInputRef.current?.click()}
-                    className={`border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-colors
-                      ${dragging ? "border-blue-400 bg-blue-50" : "border-gray-300 hover:border-gray-400 hover:bg-gray-50"}`}
-                  >
-                    <input ref={fileInputRef} type="file" accept=".xlsx,.xls" className="hidden"
-                      onChange={(e) => { if (e.target.files?.[0]) handleFile(e.target.files[0]); }} />
-                    {fileName ? (
-                      <>
-                        <p className="text-sm font-semibold text-black mb-1">{fileName}</p>
-                        <p className="text-xs text-black">
-                          발화 {parsedData?.modules.length}개 · 분기 {parsedData?.branches.length}개 로드됨 — 클릭하면 다시 업로드
-                        </p>
-                      </>
-                    ) : (
-                      <>
+                  <input ref={fileInputRef} type="file" accept=".xlsx,.xls" className="hidden"
+                    onChange={(e) => { if (e.target.files?.[0]) handleFile(e.target.files[0]); e.target.value = ""; }} />
+
+                  {excelLoading ? (
+                    <div className="flex items-center justify-center gap-2 py-8 text-sm text-gray-400">
+                      <svg className="animate-spin w-4 h-4 text-blue-500" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
+                      </svg>
+                      스크립트 불러오는 중…
+                    </div>
+                  ) : parsedData ? (
+                    <>
+                      <div className="flex items-center justify-between mb-4">
+                        <div>
+                          <p className="text-sm font-semibold text-black">{fileName}</p>
+                          <p className="text-xs text-gray-400 mt-0.5">
+                            발화 {parsedData.modules.length}개 · 분기 {parsedData.branches.length}개 로드됨
+                            {excelUpdatedAt && (
+                              <> · 최종 업데이트 {formatDate(excelUpdatedAt)}</>
+                            )}
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => fileInputRef.current?.click()}
+                          className="text-xs text-blue-600 hover:text-blue-800 border border-blue-200 rounded-lg px-3 py-1.5 bg-blue-50 whitespace-nowrap"
+                        >
+                          엑셀 교체
+                        </button>
+                      </div>
+                      {fileError && <p className="mb-3 text-sm text-red-500">{fileError}</p>}
+                    </>
+                  ) : (
+                    <>
+                      <h2 className="text-sm font-semibold text-black uppercase tracking-wide mb-4">엑셀 파일 업로드</h2>
+                      <div
+                        onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+                        onDragLeave={() => setDragging(false)}
+                        onDrop={handleDrop}
+                        onClick={() => fileInputRef.current?.click()}
+                        className={`border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-colors
+                          ${dragging ? "border-blue-400 bg-blue-50" : "border-gray-300 hover:border-gray-400 hover:bg-gray-50"}`}
+                      >
                         <p className="text-sm text-black mb-1">엑셀 파일을 드래그하거나 클릭해서 업로드</p>
-                        <p className="text-xs text-black">.xlsx, .xls 지원 (시트1: 분기, 시트3: 발화)</p>
-                      </>
-                    )}
-                  </div>
-                  {fileError && <p className="mt-3 text-sm text-red-500">{fileError}</p>}
-                  <button onClick={() => handleStart()} disabled={!parsedData}
-                    className="mt-5 w-full py-3 rounded-lg text-sm font-semibold transition-colors
+                        <p className="text-xs text-gray-400">.xlsx, .xls 지원 (시트1: 분기, 시트3: 발화)</p>
+                      </div>
+                      {fileError && <p className="mt-3 text-sm text-red-500">{fileError}</p>}
+                    </>
+                  )}
+
+                  <button onClick={() => handleStart()} disabled={!parsedData || excelLoading}
+                    className="mt-4 w-full py-3 rounded-lg text-sm font-semibold transition-colors
                       bg-blue-600 text-white hover:bg-blue-700 disabled:bg-gray-200 disabled:text-black disabled:cursor-not-allowed">
-                    {parsedData ? "상담 시작" : "파일을 먼저 업로드해주세요"}
+                    {excelLoading ? "로딩 중…" : parsedData ? "상담 시작" : "파일을 먼저 업로드해주세요"}
                   </button>
                 </div>
               </>
