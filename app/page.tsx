@@ -2,6 +2,14 @@
 
 import { useState, useRef, useCallback, useEffect } from "react";
 import * as XLSX from "xlsx";
+import { db, storage } from "./lib/firebase";
+import {
+  collection, addDoc, deleteDoc, doc,
+  onSnapshot, setDoc, getDocs, query, orderBy, where,
+} from "firebase/firestore";
+import {
+  ref as storageRef, uploadBytes, getDownloadURL, deleteObject,
+} from "firebase/storage";
 
 // ─── 타입 ────────────────────────────────────────────────────────────────────
 
@@ -69,7 +77,8 @@ interface ModuleImage {
   id: string;
   moduleCode: string;
   name: string;
-  dataUrl: string;
+  downloadUrl: string;
+  storagePath: string;
   createdAt: string;
 }
 
@@ -85,10 +94,6 @@ const CF_LABELS: Record<string, string> = {
 
 const INPUT_CLS =
   "w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-black focus:outline-none focus:ring-2 focus:ring-blue-400 bg-white";
-
-const STORAGE_KEY   = "savedScripts_v1";
-const PROFILES_KEY  = "customerProfiles_v1";
-const EDITS_KEY     = "scriptEdits_v1";
 
 // ─── 이름 치환 ────────────────────────────────────────────────────────────────
 
@@ -121,7 +126,6 @@ function parseExcel(file: File): Promise<ParsedData> {
         const data = new Uint8Array(e.target!.result as ArrayBuffer);
         const wb = XLSX.read(data, { type: "array" });
 
-        // ── 시트3: 발화 스크립트 ──
         const scriptSheet = wb.Sheets[wb.SheetNames[2]];
         const scriptRows = XLSX.utils.sheet_to_json<Record<string, string>>(scriptSheet, { defval: "" });
         const RESERVED_COLS = ["CF", "상위 모듈", "모듈 코드", "모듈명", "중요"];
@@ -130,8 +134,7 @@ function parseExcel(file: File): Promise<ParsedData> {
           .filter((r) => r["모듈명"])
           .map((r) => {
             const rawImportant = r["중요"]?.toString().trim() ?? "";
-            const 중요 =
-              rawImportant !== "" &&
+            const 중요 = rawImportant !== "" &&
               !["n", "no", "false", "아니오"].includes(rawImportant.toLowerCase());
             return {
               cf: r["CF"] || "",
@@ -144,7 +147,6 @@ function parseExcel(file: File): Promise<ParsedData> {
           })
           .filter((m) => m.발화목록.length > 0);
 
-        // ── 시트1: 분기 테이블 ──
         const branchSheet = wb.Sheets[wb.SheetNames[0]];
         const branchRows = XLSX.utils.sheet_to_json<Record<string, string>>(branchSheet, { defval: "" });
         const branches: Branch[] = branchRows
@@ -157,7 +159,6 @@ function parseExcel(file: File): Promise<ParsedData> {
             비고: r["비고"] || "",
           }));
 
-        // ── "중요발화" 시트 ──
         const customSheet = wb.Sheets["중요발화"];
         const customImportant: CustomImportant[] = customSheet
           ? XLSX.utils.sheet_to_json<Record<string, string>>(customSheet, { defval: "" })
@@ -227,74 +228,11 @@ function getBranches(moduleName: string, branches: Branch[]): Branch[] {
   );
 }
 
-// edits가 있으면 수정본 사용, 없으면 원본 사용
 function pickScript(module: Module, info: CustomerInfo, edits: Record<string, string[]>): string {
   const lines = edits[module.모듈코드] ?? module.발화목록;
   if (!lines.length) return "";
   return applyReplacements(lines[Math.floor(Math.random() * lines.length)], info);
 }
-
-// ─── IndexedDB (이미지 저장) ──────────────────────────────────────────────────
-
-const IDB_NAME    = "consultationApp";
-const IDB_VERSION = 1;
-const IDB_STORE   = "moduleImages";
-
-function openImageDB(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(IDB_NAME, IDB_VERSION);
-    req.onupgradeneeded = (e) => {
-      const db = (e.target as IDBOpenDBRequest).result;
-      if (!db.objectStoreNames.contains(IDB_STORE)) {
-        const store = db.createObjectStore(IDB_STORE, { keyPath: "id" });
-        store.createIndex("moduleCode", "moduleCode", { unique: false });
-      }
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror   = () => reject(req.error);
-  });
-}
-
-async function dbGetImages(moduleCode: string): Promise<ModuleImage[]> {
-  const db  = await openImageDB();
-  return new Promise((resolve, reject) => {
-    const tx  = db.transaction(IDB_STORE, "readonly");
-    const idx = tx.objectStore(IDB_STORE).index("moduleCode");
-    const req = idx.getAll(moduleCode);
-    req.onsuccess = () => resolve(req.result ?? []);
-    req.onerror   = () => reject(req.error);
-  });
-}
-
-async function dbSaveImage(image: ModuleImage): Promise<void> {
-  const db = await openImageDB();
-  return new Promise((resolve, reject) => {
-    const tx  = db.transaction(IDB_STORE, "readwrite");
-    const req = tx.objectStore(IDB_STORE).put(image);
-    req.onsuccess = () => resolve();
-    req.onerror   = () => reject(req.error);
-  });
-}
-
-async function dbDeleteImage(id: string): Promise<void> {
-  const db = await openImageDB();
-  return new Promise((resolve, reject) => {
-    const tx  = db.transaction(IDB_STORE, "readwrite");
-    const req = tx.objectStore(IDB_STORE).delete(id);
-    req.onsuccess = () => resolve();
-    req.onerror   = () => reject(req.error);
-  });
-}
-
-function fileToDataUrl(file: File): Promise<string> {
-  return new Promise((resolve) => {
-    const reader = new FileReader();
-    reader.onload = (e) => resolve(e.target!.result as string);
-    reader.readAsDataURL(file);
-  });
-}
-
-// ─── 날짜 포맷 ────────────────────────────────────────────────────────────────
 
 function formatDate(iso: string): string {
   const d = new Date(iso);
@@ -305,10 +243,10 @@ function formatDate(iso: string): string {
 
 export default function Home() {
   // ── 파일 ──
-  const [parsedData, setParsedData]   = useState<ParsedData | null>(null);
-  const [fileName, setFileName]       = useState("");
-  const [fileError, setFileError]     = useState("");
-  const [dragging, setDragging]       = useState(false);
+  const [parsedData,  setParsedData]  = useState<ParsedData | null>(null);
+  const [fileName,    setFileName]    = useState("");
+  const [fileError,   setFileError]   = useState("");
+  const [dragging,    setDragging]    = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // ── 고객 정보 ──
@@ -343,17 +281,18 @@ export default function Home() {
   // ── 홈 탭 ──
   const [homeTab, setHomeTab] = useState<"상담" | "저장">("상담");
 
-  // ── 저장된 발화 ──
-  const [savedScripts, setSavedScripts] = useState<SavedScript[]>([]);
+  // ── Firebase 데이터 (실시간) ──
+  const [savedScripts,     setSavedScripts]     = useState<SavedScript[]>([]);
+  const [customerProfiles, setCustomerProfiles] = useState<CustomerProfile[]>([]);
+  const [scriptEdits,      setScriptEdits]      = useState<Record<string, string[]>>({});
+  const [moduleImages,     setModuleImages]      = useState<ModuleImage[]>([]);
 
-  // ── 고객 프로필 ──
-  const [customerProfiles,  setCustomerProfiles]  = useState<CustomerProfile[]>([]);
-  const [profileName,       setProfileName]        = useState("");
-  const [showProfileSave,   setShowProfileSave]    = useState(false);
-  const [selectedProfileId, setSelectedProfileId]  = useState("");
+  // ── 프로필 UI ──
+  const [profileName,       setProfileName]       = useState("");
+  const [showProfileSave,   setShowProfileSave]   = useState(false);
+  const [selectedProfileId, setSelectedProfileId] = useState("");
 
   // ── 스크립트 편집 ──
-  const [scriptEdits,   setScriptEdits]   = useState<Record<string, string[]>>({});
   const [editingModule, setEditingModule] = useState<string | null>(null);
   const [editLines,     setEditLines]     = useState<string[]>([]);
 
@@ -361,99 +300,90 @@ export default function Home() {
   const [searchQuery, setSearchQuery] = useState("");
 
   // ── 이미지 ──
-  const [moduleImages,    setModuleImages]    = useState<ModuleImage[]>([]);
-  const [lightboxImage,   setLightboxImage]   = useState<ModuleImage | null>(null);
-  const [showImgManager,  setShowImgManager]  = useState(false);
-  const [copiedImageId,   setCopiedImageId]   = useState<string | null>(null);
+  const [lightboxImage,  setLightboxImage]  = useState<ModuleImage | null>(null);
+  const [showImgManager, setShowImgManager] = useState(false);
+  const [copiedImageId,  setCopiedImageId]  = useState<string | null>(null);
+  const [uploadingImg,   setUploadingImg]   = useState(false);
   const imageInputRef = useRef<HTMLInputElement>(null);
 
-  // ── 모듈 변경 시 이미지 로드 ──
+  // ── Firebase 실시간 리스너 ──
+
+  // 저장된 발화
   useEffect(() => {
-    if (!currentModule) { setModuleImages([]); return; }
-    dbGetImages(currentModule.모듈코드).then(setModuleImages).catch(() => {});
-  }, [currentModule]);
-
-  async function handleImageUpload(files: FileList) {
-    if (!currentModule) return;
-    for (const file of Array.from(files)) {
-      if (!file.type.startsWith("image/")) continue;
-      const dataUrl = await fileToDataUrl(file);
-      const img: ModuleImage = {
-        id: `${Date.now()}-${Math.random()}`,
-        moduleCode: currentModule.모듈코드,
-        name: file.name,
-        dataUrl,
-        createdAt: new Date().toISOString(),
-      };
-      await dbSaveImage(img);
-      setModuleImages((prev) => [...prev, img]);
-    }
-  }
-
-  async function handleDeleteImage(id: string) {
-    await dbDeleteImage(id);
-    setModuleImages((prev) => prev.filter((img) => img.id !== id));
-    if (lightboxImage?.id === id) setLightboxImage(null);
-  }
-
-  async function handleCopyImage(img: ModuleImage) {
-    try {
-      const res   = await fetch(img.dataUrl);
-      const blob  = await res.blob();
-      await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
-      setCopiedImageId(img.id);
-      setTimeout(() => setCopiedImageId(null), 2000);
-    } catch {
-      // clipboard API 미지원 브라우저 대비 — 다운로드로 대체
-      const a = document.createElement("a");
-      a.href = img.dataUrl;
-      a.download = img.name;
-      a.click();
-    }
-  }
-
-  // ── localStorage 초기화 ──
-  useEffect(() => {
-    try { const r = localStorage.getItem(STORAGE_KEY);  if (r) setSavedScripts(JSON.parse(r));    } catch {}
-    try { const r = localStorage.getItem(PROFILES_KEY); if (r) setCustomerProfiles(JSON.parse(r)); } catch {}
-    try { const r = localStorage.getItem(EDITS_KEY);    if (r) setScriptEdits(JSON.parse(r));      } catch {}
+    const unsub = onSnapshot(
+      query(collection(db, "savedScripts"), orderBy("savedAt", "desc")),
+      (snap) => setSavedScripts(snap.docs.map((d) => ({ id: d.id, ...d.data() } as SavedScript))),
+      () => {} // 에러 무시
+    );
+    return unsub;
   }, []);
 
+  // 고객 프로필
+  useEffect(() => {
+    const unsub = onSnapshot(
+      query(collection(db, "customerProfiles"), orderBy("savedAt", "desc")),
+      (snap) => setCustomerProfiles(snap.docs.map((d) => ({ id: d.id, ...d.data() } as CustomerProfile))),
+      () => {}
+    );
+    return unsub;
+  }, []);
+
+  // 스크립트 편집
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, "scriptEdits"), (snap) => {
+      const edits: Record<string, string[]> = {};
+      snap.docs.forEach((d) => { edits[d.id] = (d.data().lines as string[]) || []; });
+      setScriptEdits(edits);
+    }, () => {});
+    return unsub;
+  }, []);
+
+  // 이미지 (현재 모듈 변경 시 재구독)
+  useEffect(() => {
+    if (!currentModule) { setModuleImages([]); return; }
+    const unsub = onSnapshot(
+      query(collection(db, "moduleImages"), where("moduleCode", "==", currentModule.모듈코드)),
+      (snap) => {
+        const imgs = snap.docs.map((d) => ({ id: d.id, ...d.data() } as ModuleImage));
+        imgs.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+        setModuleImages(imgs);
+      },
+      () => {}
+    );
+    return unsub;
+  }, [currentModule]);
+
   // ── 저장된 발화 ──
-  function persistSaved(next: SavedScript[]) {
-    setSavedScripts(next);
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(next)); } catch {}
-  }
-  function handleSave() {
+  async function handleSave() {
     if (!currentModule || !currentScript) return;
     if (savedScripts.some((s) => s.발화 === currentScript && s.모듈명 === currentModule.모듈명)) return;
-    persistSaved([{
-      id: Date.now().toString(),
+    await addDoc(collection(db, "savedScripts"), {
       모듈명: currentModule.모듈명,
       모듈코드: currentModule.모듈코드,
       cf: currentModule.cf,
       발화: currentScript,
       savedAt: new Date().toISOString(),
-    }, ...savedScripts]);
+    });
   }
-  function handleDeleteSaved(id: string) { persistSaved(savedScripts.filter((s) => s.id !== id)); }
-  function handleClearAll() { if (confirm("저장된 발화를 모두 삭제할까요?")) persistSaved([]); }
+  async function handleDeleteSaved(id: string) {
+    await deleteDoc(doc(db, "savedScripts", id));
+  }
+  async function handleClearAll() {
+    if (!confirm("저장된 발화를 모두 삭제할까요?")) return;
+    const snap = await getDocs(collection(db, "savedScripts"));
+    await Promise.all(snap.docs.map((d) => deleteDoc(d.ref)));
+  }
   const isAlreadySaved = !!currentModule &&
     savedScripts.some((s) => s.발화 === currentScript && s.모듈명 === currentModule.모듈명);
 
   // ── 고객 프로필 ──
-  function persistProfiles(next: CustomerProfile[]) {
-    setCustomerProfiles(next);
-    try { localStorage.setItem(PROFILES_KEY, JSON.stringify(next)); } catch {}
-  }
-  function handleSaveProfile() {
+  async function handleSaveProfile() {
     if (!profileName.trim()) return;
-    persistProfiles([{
-      id: Date.now().toString(),
+    await addDoc(collection(db, "customerProfiles"), {
       profileName: profileName.trim(),
       savedAt: new Date().toISOString(),
       ...info,
-    }, ...customerProfiles]);
+    });
     setProfileName("");
     setShowProfileSave(false);
   }
@@ -475,31 +405,25 @@ export default function Home() {
     set우체국(p.우체국);
     set실손(p.실손);
   }
-  function handleDeleteProfile(id: string) {
-    persistProfiles(customerProfiles.filter((p) => p.id !== id));
+  async function handleDeleteProfile(id: string) {
+    await deleteDoc(doc(db, "customerProfiles", id));
     if (selectedProfileId === id) setSelectedProfileId("");
   }
 
   // ── 스크립트 편집 ──
-  function persistEdits(next: Record<string, string[]>) {
-    setScriptEdits(next);
-    try { localStorage.setItem(EDITS_KEY, JSON.stringify(next)); } catch {}
-  }
   function startEditing(module: Module) {
     setEditingModule(module.모듈코드);
     setEditLines([...(scriptEdits[module.모듈코드] ?? module.발화목록)]);
   }
-  function saveEdits() {
+  async function saveEdits() {
     if (!currentModule) return;
     const cleaned = editLines.filter((l) => l.trim());
-    persistEdits({ ...scriptEdits, [currentModule.모듈코드]: cleaned });
+    await setDoc(doc(db, "scriptEdits", currentModule.모듈코드), { lines: cleaned });
     setEditingModule(null);
   }
-  function resetModuleEdits() {
+  async function resetModuleEdits() {
     if (!currentModule) return;
-    const next = { ...scriptEdits };
-    delete next[currentModule.모듈코드];
-    persistEdits(next);
+    await deleteDoc(doc(db, "scriptEdits", currentModule.모듈코드));
     setEditingModule(null);
   }
   const isEditing = !!currentModule && editingModule === currentModule.모듈코드;
@@ -511,6 +435,47 @@ export default function Home() {
         (scriptEdits[m.모듈코드] ?? m.발화목록).some((line) => line.includes(searchQuery))
       )
     : [];
+
+  // ── 이미지 ──
+  async function handleImageUpload(files: FileList) {
+    if (!currentModule) return;
+    setUploadingImg(true);
+    try {
+      for (const file of Array.from(files)) {
+        if (!file.type.startsWith("image/")) continue;
+        const id   = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        const path = `moduleImages/${currentModule.모듈코드}/${id}/${file.name}`;
+        const sRef = storageRef(storage, path);
+        await uploadBytes(sRef, file);
+        const downloadUrl = await getDownloadURL(sRef);
+        await addDoc(collection(db, "moduleImages"), {
+          moduleCode:  currentModule.모듈코드,
+          name:        file.name,
+          downloadUrl,
+          storagePath: path,
+          createdAt:   new Date().toISOString(),
+        });
+      }
+    } finally {
+      setUploadingImg(false);
+    }
+  }
+  async function handleDeleteImage(img: ModuleImage) {
+    try { await deleteObject(storageRef(storage, img.storagePath)); } catch {}
+    await deleteDoc(doc(db, "moduleImages", img.id));
+    if (lightboxImage?.id === img.id) setLightboxImage(null);
+  }
+  async function handleCopyImage(img: ModuleImage) {
+    try {
+      const res  = await fetch(img.downloadUrl);
+      const blob = await res.blob();
+      await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+      setCopiedImageId(img.id);
+      setTimeout(() => setCopiedImageId(null), 2000);
+    } catch {
+      window.open(img.downloadUrl, "_blank");
+    }
+  }
 
   // ── 파일 ──
   const handleFile = useCallback(async (file: File) => {
@@ -597,7 +562,6 @@ export default function Home() {
         {/* ── 준비 화면 ── */}
         {!started && (
           <>
-            {/* 탭 */}
             <div className="flex gap-1 mb-4 bg-gray-200 rounded-xl p-1">
               <button onClick={() => setHomeTab("상담")}
                 className={`flex-1 py-2 rounded-lg text-sm font-semibold transition-colors ${homeTab === "상담" ? "bg-white text-black shadow-sm" : "text-gray-500 hover:text-black"}`}>
@@ -617,12 +581,10 @@ export default function Home() {
             {/* ── 상담 탭 ── */}
             {homeTab === "상담" && (
               <>
-                {/* 고객 정보 입력 */}
                 <div className="bg-white rounded-2xl border border-gray-300 p-6 mb-4">
                   <div className="flex items-center justify-between mb-4">
                     <h2 className="text-sm font-semibold text-black uppercase tracking-wide">상담 정보 입력</h2>
                     <div className="flex items-center gap-2">
-                      {/* 프로필 불러오기 */}
                       {customerProfiles.length > 0 && (
                         <div className="flex items-center gap-1.5">
                           <select value={selectedProfileId} onChange={(e) => setSelectedProfileId(e.target.value)}
@@ -642,7 +604,6 @@ export default function Home() {
                           )}
                         </div>
                       )}
-                      {/* 프로필 저장 토글 */}
                       <button onClick={() => setShowProfileSave((v) => !v)}
                         className="text-xs text-blue-600 hover:text-blue-800 border border-blue-200 rounded-lg px-2 py-1.5 bg-blue-50 whitespace-nowrap">
                         프로필 저장
@@ -650,7 +611,6 @@ export default function Home() {
                     </div>
                   </div>
 
-                  {/* 프로필 저장 인라인 폼 */}
                   {showProfileSave && (
                     <div className="flex gap-2 mb-4 p-3 bg-blue-50 rounded-xl border border-blue-100">
                       <input type="text" placeholder="프로필 이름 (예: 홍길동_25.01.01)"
@@ -837,7 +797,6 @@ export default function Home() {
             {/* ── 저장된 발화 탭 ── */}
             {homeTab === "저장" && (
               <div className="space-y-4 mb-6">
-                {/* 엑셀 중요 발화 */}
                 {parsedData && parsedData.modules.some((m) => m.중요) && (
                   <div className="bg-white rounded-2xl border border-yellow-300 p-6">
                     <div className="flex items-center gap-2 mb-4">
@@ -865,7 +824,6 @@ export default function Home() {
                   </div>
                 )}
 
-                {/* 중요발화 시트 */}
                 {parsedData && parsedData.customImportant.length > 0 && (
                   <div className="bg-white rounded-2xl border border-blue-200 p-6">
                     <div className="flex items-center gap-2 mb-4">
@@ -886,7 +844,6 @@ export default function Home() {
                   </div>
                 )}
 
-                {/* ★ 직접 저장한 발화 */}
                 <div className="bg-white rounded-2xl border border-gray-300 p-6">
                   <div className="flex items-center justify-between mb-4">
                     <h2 className="text-sm font-semibold text-black">직접 저장한 발화</h2>
@@ -912,7 +869,7 @@ export default function Home() {
                             <div className="flex items-center gap-2 flex-shrink-0">
                               <span className="text-xs text-gray-400">{formatDate(s.savedAt)}</span>
                               <button onClick={() => handleDeleteSaved(s.id)}
-                                className="text-gray-300 hover:text-red-400 transition-colors text-base leading-none" title="삭제">✕</button>
+                                className="text-gray-300 hover:text-red-400 transition-colors text-base leading-none">✕</button>
                             </div>
                           </div>
                           <p className="text-sm text-black leading-relaxed whitespace-pre-wrap bg-gray-50 rounded-lg p-3">{s.발화}</p>
@@ -981,7 +938,6 @@ export default function Home() {
                   </div>
                 </div>
 
-                {/* 편집 모드 */}
                 {isEditing ? (
                   <div className="space-y-2">
                     {editLines.map((line, i) => (
@@ -1014,37 +970,25 @@ export default function Home() {
               </div>
             </div>
 
-            {/* ── 이미지 섹션 ── */}
+            {/* 이미지 섹션 */}
             <div className="bg-white rounded-2xl border border-gray-300 overflow-hidden mb-4">
               <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100">
                 <p className="text-xs font-semibold text-black">
                   🖼 참고 이미지
-                  {moduleImages.length > 0 && (
-                    <span className="ml-2 text-gray-400">({moduleImages.length}장)</span>
-                  )}
+                  {moduleImages.length > 0 && <span className="ml-2 text-gray-400">({moduleImages.length}장)</span>}
                 </p>
                 <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => setShowImgManager((v) => !v)}
-                    className={`text-xs transition-colors ${showImgManager ? "text-blue-600 font-semibold" : "text-gray-400 hover:text-blue-600"}`}
-                  >
+                  <button onClick={() => setShowImgManager((v) => !v)}
+                    className={`text-xs transition-colors ${showImgManager ? "text-blue-600 font-semibold" : "text-gray-400 hover:text-blue-600"}`}>
                     ✏️ {showImgManager ? "완료" : "관리"}
                   </button>
                   {showImgManager && (
                     <>
-                      <input
-                        ref={imageInputRef}
-                        type="file"
-                        accept="image/*"
-                        multiple
-                        className="hidden"
-                        onChange={(e) => { if (e.target.files?.length) handleImageUpload(e.target.files); e.target.value = ""; }}
-                      />
-                      <button
-                        onClick={() => imageInputRef.current?.click()}
-                        className="text-xs bg-blue-600 text-white rounded-lg px-2 py-1 hover:bg-blue-700"
-                      >
-                        + 이미지 추가
+                      <input ref={imageInputRef} type="file" accept="image/*" multiple className="hidden"
+                        onChange={(e) => { if (e.target.files?.length) handleImageUpload(e.target.files); e.target.value = ""; }} />
+                      <button onClick={() => imageInputRef.current?.click()} disabled={uploadingImg}
+                        className="text-xs bg-blue-600 text-white rounded-lg px-2 py-1 hover:bg-blue-700 disabled:opacity-60">
+                        {uploadingImg ? "업로드 중..." : "+ 이미지 추가"}
                       </button>
                     </>
                   )}
@@ -1061,24 +1005,15 @@ export default function Home() {
                 <div className="p-4 flex gap-3 overflow-x-auto">
                   {moduleImages.map((img) => (
                     <div key={img.id} className="relative flex-shrink-0 group">
-                      <img
-                        src={img.dataUrl}
-                        alt={img.name}
-                        onClick={() => setLightboxImage(img)}
-                        className="h-28 w-auto rounded-xl border border-gray-200 cursor-pointer hover:opacity-90 transition-opacity object-cover"
-                      />
-                      {/* 복사 버튼 (hover 시 표시) */}
-                      <button
-                        onClick={() => handleCopyImage(img)}
-                        className="absolute bottom-6 left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity bg-black/60 text-white text-xs rounded-lg px-2 py-1 whitespace-nowrap"
-                      >
+                      <img src={img.downloadUrl} alt={img.name} onClick={() => setLightboxImage(img)}
+                        className="h-28 w-auto rounded-xl border border-gray-200 cursor-pointer hover:opacity-90 transition-opacity object-cover" />
+                      <button onClick={() => handleCopyImage(img)}
+                        className="absolute bottom-6 left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity bg-black/60 text-white text-xs rounded-lg px-2 py-1 whitespace-nowrap">
                         {copiedImageId === img.id ? "✓ 복사됨" : "복사"}
                       </button>
                       {showImgManager && (
-                        <button
-                          onClick={() => handleDeleteImage(img.id)}
-                          className="absolute -top-2 -right-2 w-5 h-5 rounded-full bg-red-500 text-white text-xs flex items-center justify-center hover:bg-red-600"
-                        >
+                        <button onClick={() => handleDeleteImage(img)}
+                          className="absolute -top-2 -right-2 w-5 h-5 rounded-full bg-red-500 text-white text-xs flex items-center justify-center hover:bg-red-600">
                           ✕
                         </button>
                       )}
@@ -1137,31 +1072,22 @@ export default function Home() {
 
       </div>
 
-      {/* ── 라이트박스 ── */}
+      {/* 라이트박스 */}
       {lightboxImage && (
-        <div
-          onClick={() => setLightboxImage(null)}
-          className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4"
-        >
+        <div onClick={() => setLightboxImage(null)}
+          className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4">
           <div className="relative max-w-4xl max-h-full" onClick={(e) => e.stopPropagation()}>
-            <img
-              src={lightboxImage.dataUrl}
-              alt={lightboxImage.name}
-              className="max-w-full max-h-[85vh] rounded-xl object-contain"
-            />
+            <img src={lightboxImage.downloadUrl} alt={lightboxImage.name}
+              className="max-w-full max-h-[85vh] rounded-xl object-contain" />
             <div className="flex items-center justify-center gap-3 mt-2">
               <p className="text-white text-sm opacity-70">{lightboxImage.name}</p>
-              <button
-                onClick={() => handleCopyImage(lightboxImage)}
-                className="text-xs bg-white/20 hover:bg-white/30 text-white rounded-lg px-3 py-1.5 transition-colors"
-              >
+              <button onClick={() => handleCopyImage(lightboxImage)}
+                className="text-xs bg-white/20 hover:bg-white/30 text-white rounded-lg px-3 py-1.5 transition-colors">
                 {copiedImageId === lightboxImage.id ? "✓ 복사됨" : "📋 복사"}
               </button>
             </div>
-            <button
-              onClick={() => setLightboxImage(null)}
-              className="absolute -top-3 -right-3 w-8 h-8 rounded-full bg-white text-black text-sm font-bold flex items-center justify-center hover:bg-gray-200"
-            >
+            <button onClick={() => setLightboxImage(null)}
+              className="absolute -top-3 -right-3 w-8 h-8 rounded-full bg-white text-black text-sm font-bold flex items-center justify-center hover:bg-gray-200">
               ✕
             </button>
           </div>
