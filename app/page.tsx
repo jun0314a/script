@@ -364,6 +364,7 @@ export default function Home() {
   const [moduleImages,    setModuleImages]    = useState<ModuleImage[]>([]);
   const [lightboxImage,   setLightboxImage]   = useState<ModuleImage | null>(null);
   const [showImgManager,  setShowImgManager]  = useState(false);
+  const [copiedImageId,   setCopiedImageId]   = useState<string | null>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
 
   // ── 모듈 변경 시 이미지 로드 ──
@@ -393,6 +394,22 @@ export default function Home() {
     await dbDeleteImage(id);
     setModuleImages((prev) => prev.filter((img) => img.id !== id));
     if (lightboxImage?.id === id) setLightboxImage(null);
+  }
+
+  async function handleCopyImage(img: ModuleImage) {
+    try {
+      const res   = await fetch(img.dataUrl);
+      const blob  = await res.blob();
+      await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+      setCopiedImageId(img.id);
+      setTimeout(() => setCopiedImageId(null), 2000);
+    } catch {
+      // clipboard API 미지원 브라우저 대비 — 다운로드로 대체
+      const a = document.createElement("a");
+      a.href = img.dataUrl;
+      a.download = img.name;
+      a.click();
+    }
   }
 
   // ── localStorage 초기화 ──
@@ -1043,13 +1060,20 @@ export default function Home() {
               ) : (
                 <div className="p-4 flex gap-3 overflow-x-auto">
                   {moduleImages.map((img) => (
-                    <div key={img.id} className="relative flex-shrink-0">
+                    <div key={img.id} className="relative flex-shrink-0 group">
                       <img
                         src={img.dataUrl}
                         alt={img.name}
                         onClick={() => setLightboxImage(img)}
                         className="h-28 w-auto rounded-xl border border-gray-200 cursor-pointer hover:opacity-90 transition-opacity object-cover"
                       />
+                      {/* 복사 버튼 (hover 시 표시) */}
+                      <button
+                        onClick={() => handleCopyImage(img)}
+                        className="absolute bottom-6 left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity bg-black/60 text-white text-xs rounded-lg px-2 py-1 whitespace-nowrap"
+                      >
+                        {copiedImageId === img.id ? "✓ 복사됨" : "복사"}
+                      </button>
                       {showImgManager && (
                         <button
                           onClick={() => handleDeleteImage(img.id)}
@@ -1125,7 +1149,15 @@ export default function Home() {
               alt={lightboxImage.name}
               className="max-w-full max-h-[85vh] rounded-xl object-contain"
             />
-            <p className="text-center text-white text-sm mt-2 opacity-70">{lightboxImage.name}</p>
+            <div className="flex items-center justify-center gap-3 mt-2">
+              <p className="text-white text-sm opacity-70">{lightboxImage.name}</p>
+              <button
+                onClick={() => handleCopyImage(lightboxImage)}
+                className="text-xs bg-white/20 hover:bg-white/30 text-white rounded-lg px-3 py-1.5 transition-colors"
+              >
+                {copiedImageId === lightboxImage.id ? "✓ 복사됨" : "📋 복사"}
+              </button>
+            </div>
             <button
               onClick={() => setLightboxImage(null)}
               className="absolute -top-3 -right-3 w-8 h-8 rounded-full bg-white text-black text-sm font-bold flex items-center justify-center hover:bg-gray-200"
