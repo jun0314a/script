@@ -2,14 +2,6 @@
 
 import { useState, useRef, useCallback, useEffect } from "react";
 import * as XLSX from "xlsx";
-import { db, storage } from "./lib/firebase";
-import {
-  collection, addDoc, deleteDoc, doc, getDoc,
-  onSnapshot, setDoc, getDocs, query, orderBy, where,
-} from "firebase/firestore";
-import {
-  ref as storageRef, uploadBytes, getDownloadURL, deleteObject, getBytes,
-} from "firebase/storage";
 
 // ─── 타입 ────────────────────────────────────────────────────────────────────
 
@@ -73,14 +65,25 @@ interface CustomerProfile extends CustomerInfo {
   savedAt: string;
 }
 
-interface ModuleImage {
-  id: string;
-  moduleCode: string;
+interface LocalImage {
   name: string;
-  downloadUrl: string;
-  storagePath: string;
-  createdAt: string;
+  src: string;
 }
+
+// ─── 이미지 맵 ────────────────────────────────────────────────────────────────
+// public/images/ 폴더에 이미지 파일을 넣고 아래에 등록하세요.
+// 모듈코드는 상담 화면 파란 헤더에서 확인할 수 있어요.
+//
+// 예시:
+// "MD 1": [{ name: "보장비교표", src: "/images/md1-chart.png" }],
+// "MD 2": [
+//   { name: "갱신형 그래프", src: "/images/renewal-graph.png" },
+//   { name: "보장금액 비교", src: "/images/amount-compare.png" },
+// ],
+
+const MODULE_IMAGES: Record<string, LocalImage[]> = {
+  // 여기에 이미지를 등록하세요
+};
 
 // ─── 상수 ────────────────────────────────────────────────────────────────────
 
@@ -94,6 +97,16 @@ const CF_LABELS: Record<string, string> = {
 
 const INPUT_CLS =
   "w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-black focus:outline-none focus:ring-2 focus:ring-blue-400 bg-white";
+
+// ─── localStorage 헬퍼 ───────────────────────────────────────────────────────
+
+function lsGet<T>(key: string, fallback: T): T {
+  if (typeof window === "undefined") return fallback;
+  try { return JSON.parse(localStorage.getItem(key) || "null") ?? fallback; } catch { return fallback; }
+}
+function lsSet(key: string, value: unknown) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+}
 
 // ─── 이름 치환 ────────────────────────────────────────────────────────────────
 
@@ -172,11 +185,8 @@ function parseExcel(file: File): Promise<ParsedData> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (e) => {
-      try {
-        resolve(parseExcelFromBuffer(e.target!.result as ArrayBuffer));
-      } catch {
-        reject(new Error("파일을 읽는 중 오류가 발생했습니다."));
-      }
+      try { resolve(parseExcelFromBuffer(e.target!.result as ArrayBuffer)); }
+      catch { reject(new Error("파일을 읽는 중 오류가 발생했습니다.")); }
     };
     reader.onerror = () => reject(new Error("파일 읽기 실패"));
     reader.readAsArrayBuffer(file);
@@ -252,7 +262,6 @@ export default function Home() {
   const [fileError,    setFileError]    = useState("");
   const [dragging,     setDragging]     = useState(false);
   const [excelLoading, setExcelLoading] = useState(true);
-  const [excelUpdatedAt, setExcelUpdatedAt] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // ── 고객 정보 ──
@@ -287,11 +296,10 @@ export default function Home() {
   // ── 홈 탭 ──
   const [homeTab, setHomeTab] = useState<"상담" | "저장">("상담");
 
-  // ── Firebase 데이터 (실시간) ──
+  // ── 로컬 데이터 ──
   const [savedScripts,     setSavedScripts]     = useState<SavedScript[]>([]);
   const [customerProfiles, setCustomerProfiles] = useState<CustomerProfile[]>([]);
   const [scriptEdits,      setScriptEdits]      = useState<Record<string, string[]>>({});
-  const [moduleImages,     setModuleImages]      = useState<ModuleImage[]>([]);
 
   // ── 프로필 UI ──
   const [profileName,       setProfileName]       = useState("");
@@ -306,133 +314,75 @@ export default function Home() {
   const [searchQuery, setSearchQuery] = useState("");
 
   // ── 이미지 ──
-  const [lightboxImage,  setLightboxImage]  = useState<ModuleImage | null>(null);
-  const [showImgManager, setShowImgManager] = useState(false);
-  const [copiedImageId,  setCopiedImageId]  = useState<string | null>(null);
-  const [uploadingImg,   setUploadingImg]   = useState(false);
-  const imageInputRef = useRef<HTMLInputElement>(null);
+  const [lightboxImage,  setLightboxImage]  = useState<LocalImage | null>(null);
+  const [copiedImageSrc, setCopiedImageSrc] = useState<string | null>(null);
 
-  // ── 앱 시작 시 Firebase Storage에서 엑셀 자동 로드 ──
+  // ── 초기 로드 ──
   useEffect(() => {
-    async function loadExcelFromStorage() {
-      try {
-        const buffer = await getBytes(storageRef(storage, "excel/scripts.xlsx"));
-        const data = parseExcelFromBuffer(buffer);
-        const metaSnap = await getDoc(doc(db, "config", "excelFile"));
-        const meta = metaSnap.exists() ? metaSnap.data() : null;
+    setSavedScripts(lsGet<SavedScript[]>("savedScripts", []));
+    setCustomerProfiles(lsGet<CustomerProfile[]>("customerProfiles", []));
+    setScriptEdits(lsGet<Record<string, string[]>>("scriptEdits", {}));
+
+    // public/scripts.xlsx 자동 로드
+    fetch("/scripts.xlsx")
+      .then((res) => {
+        if (!res.ok) throw new Error("없음");
+        return res.arrayBuffer();
+      })
+      .then((buf) => {
+        const data = parseExcelFromBuffer(buf);
         setParsedData(data);
-        setFileName(meta?.fileName ?? "scripts.xlsx");
-        setExcelUpdatedAt(meta?.updatedAt ?? "");
-      } catch {
-        // Firebase에 엑셀 없음 → 첫 업로드 필요
-      } finally {
-        setExcelLoading(false);
-      }
-    }
-    loadExcelFromStorage();
+        setFileName("scripts.xlsx");
+      })
+      .catch(() => {/* 파일 없음 → 수동 업로드 */})
+      .finally(() => setExcelLoading(false));
   }, []);
-
-  // ── Firebase 실시간 리스너 ──
-
-  // 저장된 발화
-  useEffect(() => {
-    const unsub = onSnapshot(
-      query(collection(db, "savedScripts"), orderBy("savedAt", "desc")),
-      (snap) => setSavedScripts(snap.docs.map((d) => ({ id: d.id, ...d.data() } as SavedScript))),
-      () => {} // 에러 무시
-    );
-    return unsub;
-  }, []);
-
-  // 고객 프로필
-  useEffect(() => {
-    const unsub = onSnapshot(
-      query(collection(db, "customerProfiles"), orderBy("savedAt", "desc")),
-      (snap) => setCustomerProfiles(snap.docs.map((d) => ({ id: d.id, ...d.data() } as CustomerProfile))),
-      () => {}
-    );
-    return unsub;
-  }, []);
-
-  // 스크립트 편집
-  useEffect(() => {
-    const unsub = onSnapshot(collection(db, "scriptEdits"), (snap) => {
-      const edits: Record<string, string[]> = {};
-      snap.docs.forEach((d) => { edits[d.id] = (d.data().lines as string[]) || []; });
-      setScriptEdits(edits);
-    }, () => {});
-    return unsub;
-  }, []);
-
-  // 이미지 (현재 모듈 변경 시 재구독)
-  useEffect(() => {
-    if (!currentModule) { setModuleImages([]); return; }
-    const unsub = onSnapshot(
-      query(collection(db, "moduleImages"), where("moduleCode", "==", currentModule.모듈코드)),
-      (snap) => {
-        const imgs = snap.docs.map((d) => ({ id: d.id, ...d.data() } as ModuleImage));
-        imgs.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-        setModuleImages(imgs);
-      },
-      () => {}
-    );
-    return unsub;
-  }, [currentModule]);
 
   // ── 저장된 발화 ──
-  async function handleSave() {
+  function handleSave() {
     if (!currentModule || !currentScript) return;
     if (savedScripts.some((s) => s.발화 === currentScript && s.모듈명 === currentModule.모듈명)) return;
-    await addDoc(collection(db, "savedScripts"), {
-      모듈명: currentModule.모듈명,
-      모듈코드: currentModule.모듈코드,
-      cf: currentModule.cf,
-      발화: currentScript,
-      savedAt: new Date().toISOString(),
-    });
+    const next = [
+      { id: `${Date.now()}`, 모듈명: currentModule.모듈명, 모듈코드: currentModule.모듈코드, cf: currentModule.cf, 발화: currentScript, savedAt: new Date().toISOString() },
+      ...savedScripts,
+    ];
+    setSavedScripts(next);
+    lsSet("savedScripts", next);
   }
-  async function handleDeleteSaved(id: string) {
-    await deleteDoc(doc(db, "savedScripts", id));
+  function handleDeleteSaved(id: string) {
+    const next = savedScripts.filter((s) => s.id !== id);
+    setSavedScripts(next); lsSet("savedScripts", next);
   }
-  async function handleClearAll() {
+  function handleClearAll() {
     if (!confirm("저장된 발화를 모두 삭제할까요?")) return;
-    const snap = await getDocs(collection(db, "savedScripts"));
-    await Promise.all(snap.docs.map((d) => deleteDoc(d.ref)));
+    setSavedScripts([]); lsSet("savedScripts", []);
   }
   const isAlreadySaved = !!currentModule &&
     savedScripts.some((s) => s.발화 === currentScript && s.모듈명 === currentModule.모듈명);
 
   // ── 고객 프로필 ──
-  async function handleSaveProfile() {
+  function handleSaveProfile() {
     if (!profileName.trim()) return;
-    await addDoc(collection(db, "customerProfiles"), {
-      profileName: profileName.trim(),
-      savedAt: new Date().toISOString(),
-      ...info,
-    });
-    setProfileName("");
-    setShowProfileSave(false);
+    const next = [
+      { id: `${Date.now()}`, profileName: profileName.trim(), savedAt: new Date().toISOString(), ...info },
+      ...customerProfiles,
+    ];
+    setCustomerProfiles(next); lsSet("customerProfiles", next);
+    setProfileName(""); setShowProfileSave(false);
   }
   function handleLoadProfile() {
     const p = customerProfiles.find((p) => p.id === selectedProfileId);
     if (!p) return;
-    setCustomerName(p.customerName);
-    setGender(p.gender);
-    setAge(p.age);
-    setConsultantName(p.consultantName);
-    setRenewalType(p.renewalType);
-    setCoverageRange(p.coverageRange);
-    setCoverageAmount(p.coverageAmount);
-    setCoveragePeriod(p.coveragePeriod);
-    set하위보험사(p.하위보험사);
-    set유병력자(p.유병력자);
-    set생손보사(p.생손보사);
-    setCi(p.ci);
-    set우체국(p.우체국);
-    set실손(p.실손);
+    setCustomerName(p.customerName); setGender(p.gender); setAge(p.age);
+    setConsultantName(p.consultantName); setRenewalType(p.renewalType);
+    setCoverageRange(p.coverageRange); setCoverageAmount(p.coverageAmount);
+    setCoveragePeriod(p.coveragePeriod); set하위보험사(p.하위보험사);
+    set유병력자(p.유병력자); set생손보사(p.생손보사); setCi(p.ci);
+    set우체국(p.우체국); set실손(p.실손);
   }
-  async function handleDeleteProfile(id: string) {
-    await deleteDoc(doc(db, "customerProfiles", id));
+  function handleDeleteProfile(id: string) {
+    const next = customerProfiles.filter((p) => p.id !== id);
+    setCustomerProfiles(next); lsSet("customerProfiles", next);
     if (selectedProfileId === id) setSelectedProfileId("");
   }
 
@@ -441,15 +391,18 @@ export default function Home() {
     setEditingModule(module.모듈코드);
     setEditLines([...(scriptEdits[module.모듈코드] ?? module.발화목록)]);
   }
-  async function saveEdits() {
+  function saveEdits() {
     if (!currentModule) return;
     const cleaned = editLines.filter((l) => l.trim());
-    await setDoc(doc(db, "scriptEdits", currentModule.모듈코드), { lines: cleaned });
+    const next = { ...scriptEdits, [currentModule.모듈코드]: cleaned };
+    setScriptEdits(next); lsSet("scriptEdits", next);
     setEditingModule(null);
   }
-  async function resetModuleEdits() {
+  function resetModuleEdits() {
     if (!currentModule) return;
-    await deleteDoc(doc(db, "scriptEdits", currentModule.모듈코드));
+    const next = { ...scriptEdits };
+    delete next[currentModule.모듈코드];
+    setScriptEdits(next); lsSet("scriptEdits", next);
     setEditingModule(null);
   }
   const isEditing = !!currentModule && editingModule === currentModule.모듈코드;
@@ -462,44 +415,16 @@ export default function Home() {
       )
     : [];
 
-  // ── 이미지 ──
-  async function handleImageUpload(files: FileList) {
-    if (!currentModule) return;
-    setUploadingImg(true);
+  // ── 이미지 복사 ──
+  async function handleCopyImage(src: string) {
     try {
-      for (const file of Array.from(files)) {
-        if (!file.type.startsWith("image/")) continue;
-        const id   = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        const path = `moduleImages/${currentModule.모듈코드}/${id}/${file.name}`;
-        const sRef = storageRef(storage, path);
-        await uploadBytes(sRef, file);
-        const downloadUrl = await getDownloadURL(sRef);
-        await addDoc(collection(db, "moduleImages"), {
-          moduleCode:  currentModule.모듈코드,
-          name:        file.name,
-          downloadUrl,
-          storagePath: path,
-          createdAt:   new Date().toISOString(),
-        });
-      }
-    } finally {
-      setUploadingImg(false);
-    }
-  }
-  async function handleDeleteImage(img: ModuleImage) {
-    try { await deleteObject(storageRef(storage, img.storagePath)); } catch {}
-    await deleteDoc(doc(db, "moduleImages", img.id));
-    if (lightboxImage?.id === img.id) setLightboxImage(null);
-  }
-  async function handleCopyImage(img: ModuleImage) {
-    try {
-      const res  = await fetch(img.downloadUrl);
+      const res = await fetch(src);
       const blob = await res.blob();
       await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
-      setCopiedImageId(img.id);
-      setTimeout(() => setCopiedImageId(null), 2000);
+      setCopiedImageSrc(src);
+      setTimeout(() => setCopiedImageSrc(null), 2000);
     } catch {
-      window.open(img.downloadUrl, "_blank");
+      window.open(src, "_blank");
     }
   }
 
@@ -509,29 +434,11 @@ export default function Home() {
       setFileError("엑셀 파일(.xlsx, .xls)만 업로드 가능합니다."); return;
     }
     setFileError("");
-    setExcelLoading(true);
     try {
       const data = await parseExcel(file);
-      // Firebase Storage에 저장 (팀 전체 공유)
-      const sRef = storageRef(storage, "excel/scripts.xlsx");
-      await uploadBytes(sRef, file, {
-        contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      });
-      const updatedAt = new Date().toISOString();
-      await setDoc(doc(db, "config", "excelFile"), {
-        fileName: file.name,
-        updatedAt,
-      });
-      setParsedData(data);
-      setFileName(file.name);
-      setExcelUpdatedAt(updatedAt);
-      setStarted(false);
-      setDone(false);
-    } catch (e) {
-      setFileError((e as Error).message);
-    } finally {
-      setExcelLoading(false);
-    }
+      setParsedData(data); setFileName(file.name);
+      setStarted(false); setDone(false);
+    } catch (e) { setFileError((e as Error).message); }
   }, []);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
@@ -546,12 +453,8 @@ export default function Home() {
     if (!first) return;
     setCurrentModule(first);
     setCurrentScript(pickScript(first, info, scriptEdits));
-    setHistory([]);
-    setDone(false);
-    setStarted(true);
-    setSearchQuery("");
+    setHistory([]); setDone(false); setStarted(true); setSearchQuery("");
   }
-
   function handleResponse(branch: Branch) {
     if (!parsedData || !currentModule) return;
     setHistory((h) => [...h, { module: currentModule, script: currentScript }]);
@@ -566,7 +469,6 @@ export default function Home() {
     if (target) { setCurrentModule(target); setCurrentScript(pickScript(target, info, scriptEdits)); }
     else setDone(true);
   }
-
   function handleNext() {
     if (!parsedData || !currentModule) return;
     setHistory((h) => [...h, { module: currentModule, script: currentScript }]);
@@ -574,16 +476,12 @@ export default function Home() {
     if (next) { setCurrentModule(next); setCurrentScript(pickScript(next, info, scriptEdits)); }
     else setDone(true);
   }
-
   function handleBack() {
     if (history.length === 0) return;
     const prev = history[history.length - 1];
     setHistory((h) => h.slice(0, -1));
-    setCurrentModule(prev.module);
-    setCurrentScript(prev.script);
-    setDone(false);
+    setCurrentModule(prev.module); setCurrentScript(prev.script); setDone(false);
   }
-
   function handleReroll() {
     if (!currentModule) return;
     setCurrentScript(pickScript(currentModule, info, scriptEdits));
@@ -591,6 +489,7 @@ export default function Home() {
 
   const currentBranches = parsedData && currentModule
     ? getBranches(currentModule.모듈명, parsedData.branches) : [];
+  const currentModuleImages = currentModule ? (MODULE_IMAGES[currentModule.모듈코드] ?? []) : [];
 
   return (
     <main className="min-h-screen py-10 px-4">
@@ -813,26 +712,18 @@ export default function Home() {
                       스크립트 불러오는 중…
                     </div>
                   ) : parsedData ? (
-                    <>
-                      <div className="flex items-center justify-between mb-4">
-                        <div>
-                          <p className="text-sm font-semibold text-black">{fileName}</p>
-                          <p className="text-xs text-gray-400 mt-0.5">
-                            발화 {parsedData.modules.length}개 · 분기 {parsedData.branches.length}개 로드됨
-                            {excelUpdatedAt && (
-                              <> · 최종 업데이트 {formatDate(excelUpdatedAt)}</>
-                            )}
-                          </p>
-                        </div>
-                        <button
-                          onClick={() => fileInputRef.current?.click()}
-                          className="text-xs text-blue-600 hover:text-blue-800 border border-blue-200 rounded-lg px-3 py-1.5 bg-blue-50 whitespace-nowrap"
-                        >
-                          엑셀 교체
-                        </button>
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-sm font-semibold text-black">{fileName}</p>
+                        <p className="text-xs text-gray-400 mt-0.5">
+                          발화 {parsedData.modules.length}개 · 분기 {parsedData.branches.length}개 로드됨
+                        </p>
                       </div>
-                      {fileError && <p className="mb-3 text-sm text-red-500">{fileError}</p>}
-                    </>
+                      <button onClick={() => fileInputRef.current?.click()}
+                        className="text-xs text-blue-600 hover:text-blue-800 border border-blue-200 rounded-lg px-3 py-1.5 bg-blue-50 whitespace-nowrap">
+                        엑셀 교체
+                      </button>
+                    </div>
                   ) : (
                     <>
                       <h2 className="text-sm font-semibold text-black uppercase tracking-wide mb-4">엑셀 파일 업로드</h2>
@@ -847,10 +738,10 @@ export default function Home() {
                         <p className="text-sm text-black mb-1">엑셀 파일을 드래그하거나 클릭해서 업로드</p>
                         <p className="text-xs text-gray-400">.xlsx, .xls 지원 (시트1: 분기, 시트3: 발화)</p>
                       </div>
-                      {fileError && <p className="mt-3 text-sm text-red-500">{fileError}</p>}
                     </>
                   )}
 
+                  {fileError && <p className="mt-3 text-sm text-red-500">{fileError}</p>}
                   <button onClick={() => handleStart()} disabled={!parsedData || excelLoading}
                     className="mt-4 w-full py-3 rounded-lg text-sm font-semibold transition-colors
                       bg-blue-600 text-white hover:bg-blue-700 disabled:bg-gray-200 disabled:text-black disabled:cursor-not-allowed">
@@ -1037,58 +928,28 @@ export default function Home() {
             </div>
 
             {/* 이미지 섹션 */}
-            <div className="bg-white rounded-2xl border border-gray-300 overflow-hidden mb-4">
-              <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100">
-                <p className="text-xs font-semibold text-black">
-                  🖼 참고 이미지
-                  {moduleImages.length > 0 && <span className="ml-2 text-gray-400">({moduleImages.length}장)</span>}
-                </p>
-                <div className="flex items-center gap-2">
-                  <button onClick={() => setShowImgManager((v) => !v)}
-                    className={`text-xs transition-colors ${showImgManager ? "text-blue-600 font-semibold" : "text-gray-400 hover:text-blue-600"}`}>
-                    ✏️ {showImgManager ? "완료" : "관리"}
-                  </button>
-                  {showImgManager && (
-                    <>
-                      <input ref={imageInputRef} type="file" accept="image/*" multiple className="hidden"
-                        onChange={(e) => { if (e.target.files?.length) handleImageUpload(e.target.files); e.target.value = ""; }} />
-                      <button onClick={() => imageInputRef.current?.click()} disabled={uploadingImg}
-                        className="text-xs bg-blue-600 text-white rounded-lg px-2 py-1 hover:bg-blue-700 disabled:opacity-60">
-                        {uploadingImg ? "업로드 중..." : "+ 이미지 추가"}
-                      </button>
-                    </>
-                  )}
-                </div>
-              </div>
-
-              {moduleImages.length === 0 ? (
-                <div className="px-5 py-6 text-center">
-                  <p className="text-xs text-gray-400">
-                    {showImgManager ? '"+ 이미지 추가" 버튼으로 이미지를 등록하세요.' : "등록된 이미지가 없습니다."}
+            {currentModuleImages.length > 0 && (
+              <div className="bg-white rounded-2xl border border-gray-300 overflow-hidden mb-4">
+                <div className="px-5 py-3 border-b border-gray-100">
+                  <p className="text-xs font-semibold text-black">
+                    🖼 참고 이미지 <span className="text-gray-400">({currentModuleImages.length}장)</span>
                   </p>
                 </div>
-              ) : (
                 <div className="p-4 flex gap-3 overflow-x-auto">
-                  {moduleImages.map((img) => (
-                    <div key={img.id} className="relative flex-shrink-0 group">
-                      <img src={img.downloadUrl} alt={img.name} onClick={() => setLightboxImage(img)}
+                  {currentModuleImages.map((img, i) => (
+                    <div key={i} className="relative flex-shrink-0 group">
+                      <img src={img.src} alt={img.name} onClick={() => setLightboxImage(img)}
                         className="h-28 w-auto rounded-xl border border-gray-200 cursor-pointer hover:opacity-90 transition-opacity object-cover" />
-                      <button onClick={() => handleCopyImage(img)}
+                      <button onClick={() => handleCopyImage(img.src)}
                         className="absolute bottom-6 left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity bg-black/60 text-white text-xs rounded-lg px-2 py-1 whitespace-nowrap">
-                        {copiedImageId === img.id ? "✓ 복사됨" : "복사"}
+                        {copiedImageSrc === img.src ? "✓ 복사됨" : "복사"}
                       </button>
-                      {showImgManager && (
-                        <button onClick={() => handleDeleteImage(img)}
-                          className="absolute -top-2 -right-2 w-5 h-5 rounded-full bg-red-500 text-white text-xs flex items-center justify-center hover:bg-red-600">
-                          ✕
-                        </button>
-                      )}
                       <p className="text-xs text-gray-400 mt-1 truncate max-w-24">{img.name}</p>
                     </div>
                   ))}
                 </div>
-              )}
-            </div>
+              </div>
+            )}
 
             <div className="bg-white rounded-2xl border border-gray-300 p-5">
               {currentBranches.length > 0 && (
@@ -1143,13 +1004,13 @@ export default function Home() {
         <div onClick={() => setLightboxImage(null)}
           className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4">
           <div className="relative max-w-4xl max-h-full" onClick={(e) => e.stopPropagation()}>
-            <img src={lightboxImage.downloadUrl} alt={lightboxImage.name}
+            <img src={lightboxImage.src} alt={lightboxImage.name}
               className="max-w-full max-h-[85vh] rounded-xl object-contain" />
             <div className="flex items-center justify-center gap-3 mt-2">
               <p className="text-white text-sm opacity-70">{lightboxImage.name}</p>
-              <button onClick={() => handleCopyImage(lightboxImage)}
+              <button onClick={() => handleCopyImage(lightboxImage.src)}
                 className="text-xs bg-white/20 hover:bg-white/30 text-white rounded-lg px-3 py-1.5 transition-colors">
-                {copiedImageId === lightboxImage.id ? "✓ 복사됨" : "📋 복사"}
+                {copiedImageSrc === lightboxImage.src ? "✓ 복사됨" : "📋 복사"}
               </button>
             </div>
             <button onClick={() => setLightboxImage(null)}
