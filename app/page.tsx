@@ -82,8 +82,9 @@ interface LocalImage {
 // ],
 
 const MODULE_IMAGES: Record<string, LocalImage[]> = {
-    "MD 3-1": [{ name: "신원증빙", src: "/images/sjcard.png" }],
-
+    "MD 3-1": [{ name: "신원증빙", src: "/images/sjcard.png",}],
+    "MD 2-2-1": [{ name: "보장범위", src: "/images/뇌혈관질환.png" },
+                 { name : "보장범위", src : "/images/허혈성심장질환.png"}],
 };
 
 // ─── 상수 ────────────────────────────────────────────────────────────────────
@@ -224,7 +225,8 @@ function shouldShowModule(module: Module, info: CustomerInfo): boolean {
 }
 
 function findNextVisible(fromModule: Module, modules: Module[], info: CustomerInfo): Module | undefined {
-  const idx = modules.findIndex((m) => m.모듈명 === fromModule.모듈명);
+  let idx = modules.findIndex((m) => m.모듈코드 === fromModule.모듈코드 && m.모듈명 === fromModule.모듈명);
+  if (idx === -1) idx = modules.findIndex((m) => m.모듈명 === fromModule.모듈명);
   for (let i = idx + 1; i < modules.length; i++) {
     if (shouldShowModule(modules[i], info)) return modules[i];
   }
