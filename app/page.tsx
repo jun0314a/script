@@ -83,6 +83,7 @@ interface LocalImage {
 
 const MODULE_IMAGES: Record<string, LocalImage[]> = {
     "MD 3-1": [{ name: "신원증빙", src: "/images/sjcard.png",}],
+    "MD 2-1-3": [{ name: "갱신형 리스크", src: "/images/갱신형.png",}],
     "MD 2-2-1": [{ name: "보장범위", src: "/images/뇌혈관질환.png" },
                  { name : "보장범위", src : "/images/허혈성심장질환.png"}],
 };
